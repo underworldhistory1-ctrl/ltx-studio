@@ -21,13 +21,26 @@ class JobCancelled(Exception):
 class Engine:
     def __init__(self, comfy_client: ComfyClient = None):
         self.comfy = comfy_client or ComfyClient()
+        self._idle_free_task = None
+        self._execution_lock = asyncio.Lock()
+        self._idle_generation = 0
 
     async def free_h3_cache(self):
         """Politely requests H3 ComfyUI on port 8188 to unload cached models and free PyTorch VRAM."""
         cfg = load_config()
+        if not cfg.get("coordinate_h3", True):
+            return
         h3_url = cfg.get("h3_url", "http://127.0.0.1:8188").rstrip("/")
         try:
             async with aiohttp.ClientSession() as s:
+                async with s.get(f"{h3_url}/queue", timeout=aiohttp.ClientTimeout(total=4)) as r:
+                    if r.status != 200:
+                        return
+                    queue = await r.json()
+                if not isinstance(queue, dict) or any(not isinstance(queue.get(k), list) for k in ("queue_running", "queue_pending")):
+                    return
+                if queue["queue_running"] or queue["queue_pending"]:
+                    return
                 await s.post(f"{h3_url}/free", json={"unload_models": True, "free_memory": True}, timeout=aiohttp.ClientTimeout(total=4))
         except Exception:
             pass
@@ -86,22 +99,44 @@ class Engine:
                         pass
 
                 # Sum VRAM of all other processes on the GPU (e.g. H3 PID 131001)
+                own_vram = 0
                 other_procs_vram = 0
                 for proc in g.get("procs", []):
                     if proc["pid"] != ltx_worker_pid:
                         other_procs_vram += proc.get("mb", 0)
+                    else:
+                        own_vram += proc.get("mb", 0)
 
                 # If H3 or other apps are holding > 4GB VRAM, H3 is still resident/caching/decoding
                 if other_procs_vram > 4000:
                     return True
 
                 # If total free VRAM is under 20 GB, there's not enough room to safely run 22B LTX
-                if free_mb < 20000:
+                if free_mb + own_vram < 20000:
                     return True
         except Exception:
             pass
 
         return False
+
+    async def release_temporary_memory(self):
+        # /free with free_memory=True resets ComfyUI's executor cache. RAM-pressure
+        # caching already evicts tensors at the configured headroom thresholds;
+        # resetting it every chunk defeats loader and conditioning reuse.
+        cfg = load_config()
+        adaptive = cfg.get("cache_mode") == "ram" or "--cache-ram" in cfg.get("comfy_extra_args", [])
+        if not adaptive:
+            await self.comfy.free(unload=False, free_memory=True)
+
+    def reusable_vram_mb(self):
+        """Free memory plus this worker's reusable model cache; never count other workers."""
+        gpu = sysmon.gpu_info()
+        if not gpu.get("available") or not gpu.get("vram_total_mb"):
+            return None
+        own_pid = read_json(DIRS["state"] / "comfy.pid", {}).get("pid")
+        own_mb = sum(p.get("mb", 0) for p in gpu.get("procs", [])
+                     if own_pid is not None and p.get("pid") == own_pid)
+        return gpu["vram_total_mb"] - gpu.get("vram_used_mb", 0) + own_mb
 
     async def wait_for_gpu_vram(self, job: dict, on_update):
         """Coordinates GPU access: if H3 Studio is actively rendering, decoding, or encoding, waits until GPU frees up."""
@@ -110,8 +145,11 @@ class Engine:
         while waited < max_wait:
             if job.get("status") == "cancelled":
                 raise JobCancelled()
+            # An idle H3 worker may still own its cached model. Release that cache
+            # before applying the physical-memory guard, otherwise admission stalls.
+            await self.free_h3_cache()
             h3_busy = await self.check_h3_busy()
-            free_mb = sysmon.free_vram_mb()
+            free_mb = self.reusable_vram_mb()
             if not h3_busy and (free_mb is None or free_mb >= 20000):
                 # Settle cooldown: wait 6 seconds to ensure any final encoding / file writes have fully settled
                 await asyncio.sleep(6)
@@ -120,7 +158,7 @@ class Engine:
                 await asyncio.sleep(2)
                 # Final check after settle
                 h3_busy_again = await self.check_h3_busy()
-                free_mb_again = sysmon.free_vram_mb()
+                free_mb_again = self.reusable_vram_mb()
                 if not h3_busy_again and (free_mb_again is None or free_mb_again >= 20000):
                     break
 
@@ -168,6 +206,20 @@ class Engine:
             raise RuntimeError(f"Missing required models: {', '.join(missing)}. Please check the installer progress or download status.")
 
     async def execute(self, job: dict, on_update):
+        # Serialize admission against an idle unload already in flight. Do not cancel
+        # an accepted /free request: wait for the idle critical section to finish.
+        self._idle_generation += 1
+        async with self._execution_lock:
+            if self._idle_free_task is not None:
+                self._idle_free_task.cancel()
+                try:
+                    await self._idle_free_task
+                except asyncio.CancelledError:
+                    pass
+                self._idle_free_task = None
+            return await self._execute(job, on_update)
+
+    async def _execute(self, job: dict, on_update):
         job_id = job["id"]
         src = job["input_video_path"]
         settings = job["settings"]
@@ -290,7 +342,7 @@ class Engine:
                 first_frame_name = await self.comfy.upload(str(frm_path))
 
             # Flush unused cached tensors before each chunk to prevent OOM
-            await self.comfy.free(unload=False, free_memory=True)
+            await self.release_temporary_memory()
 
             # Build and submit workflow
             prompt = build_workflow(settings, up_name, c_tag, tw, th, cw, ch, save_options=save_opts, first_frame_image_name=first_frame_name)
@@ -376,7 +428,7 @@ class Engine:
             ws_task.cancel()
 
             # Flush memory immediately after chunk completion
-            await self.comfy.free(unload=False, free_memory=True)
+            await self.release_temporary_memory()
 
             if not history_item:
                 raise RuntimeError(f"Chunk {idx} produced no output file")
@@ -545,8 +597,19 @@ class Engine:
         # Release VRAM if configured to free on idle
         cfg = load_config()
         if cfg.get("release_vram_idle_s", 0) > 0:
-            asyncio.create_task(self._delayed_vram_free(cfg["release_vram_idle_s"]))
+            self._idle_free_task = asyncio.create_task(self._delayed_vram_free(cfg["release_vram_idle_s"], self._idle_generation))
 
-    async def _delayed_vram_free(self, delay: int):
+    async def _delayed_vram_free(self, delay: int, generation: int):
         await asyncio.sleep(delay)
-        await self.comfy.free(unload=True)
+        async with self._execution_lock:
+            if generation != self._idle_generation:
+                return
+            try:
+                queue = await self.comfy.queue()
+                if not isinstance(queue, dict) or any(not isinstance(queue.get(k), list) for k in ("queue_running", "queue_pending")):
+                    return
+                if queue["queue_running"] or queue["queue_pending"]:
+                    return
+                await self.comfy.free(unload=True)
+            except (aiohttp.ClientError, asyncio.TimeoutError):
+                return  # Retry on a later idle period; never guess that the worker is idle.

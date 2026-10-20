@@ -160,6 +160,9 @@ class JobManager:
                         self.queue.pop(0)
                         continue
 
+                    # Release only a verified idle H3 cache before the admission guard.
+                    # An active queue is never asked to unload.
+                    await self.engine.free_h3_cache()
                     # Check if shared GPU is currently busy with H3 render
                     h3_busy = await self._check_h3_busy()
                     if h3_busy:

@@ -160,7 +160,11 @@ On NVIDIA Blackwell and Ada Lovelace architectures, large DiT transformer alloca
 # Set in worker supervisor environment
 export PYTORCH_CUDA_ALLOC_CONF="backend:native,expandable_segments:True"
 ```
-Combined with `--disable-cuda-malloc`, `--cache-none`, and `--fp16-intermediates`, this ensures rock-solid stability during extended 4K batch rendering.
+Cache policy is configurable. `cache_mode: "none"` keeps conservative per-chunk cleanup. For repeated renders, adaptive RAM caching can retain loaders and conditioning while evicting tensors under memory pressure; the engine preserves that cache instead of resetting the executor before and after every chunk. On a 40 GB RAM / RTX 5090 deployment, `cache_mode: "auto"` with `comfy_extra_args: ["--cache-ram", "8", "16"]` was selected for bounded caching. Recheck available RAM and worker flag support before using those thresholds elsewhere. This does not guarantee that every 4K workload fits memory.
+
+A short repeatability check on that deployment (512x288,49 frames,24fps,Refine,8 steps,seed42) completed in67.2 seconds cold and15.1 seconds warm. ComfyUI history confirmed reuse of model/VAE/IC-LoRA/conditioning loaders while sampling reran. The output retained49 frames and audio and passed full FFmpeg decoding; no cgroup OOM kills occurred. These timings are specific to the small repeated workload, not full-resolution throughput guarantees.
+
+GPU admission counts only the matching LTX worker's resident VRAM as reusable. An idle H3 queue is verified before requesting its cache release, avoiding a cached-model handoff deadlock. Idle release timers are serialized against jobs and recheck the actual ComfyUI queue, so an old timer cannot clear the next job's cache. The extra model paths file resolves `../models` relative to its config directory, keeping cloned installations portable.
 
 ---
 
