@@ -7,6 +7,8 @@ let schemaData = null;
 let presetsData = {};
 let sseInstaller = null;
 let sseJobs = null;
+let jobsRefreshRequest = null;
+let jobMonitorEpoch = 0;
 
 document.addEventListener('DOMContentLoaded', () => {
   initNavigation();
@@ -131,6 +133,7 @@ function uploadFile(file) {
 }
 
 function renderSourceMedia(data) {
+  clearJobMonitor();
   currentSource = data;
   const card = document.getElementById('source-media-card');
   const player = document.getElementById('source-player');
@@ -537,7 +540,7 @@ async function submitJob(isTest = false) {
     });
     const data = await res.json();
     if (data.success && data.job) {
-      activeJobId = data.job.id;
+      rememberActiveJob(data.job.id);
       displayActiveJob(data.job);
       refreshJobsList();
     } else {
@@ -645,11 +648,19 @@ async function saveBannerToken() {
 
 // ==================== SSE JOB PROGRESS ====================
 function initSSEJobs() {
+  try {
+    const saved = new URL(location.href).searchParams.get('job') || sessionStorage.getItem('ltx.activeJobId');
+    if (saved && /^ltx_[a-zA-Z0-9_-]+$/.test(saved)) activeJobId = saved;
+  } catch (_) {}
   sseJobs = new EventSource('/api/jobs/events');
+  // A reconnect does not replay the server's previous state transitions.
+  sseJobs.onopen = () => refreshJobsList();
+  sseJobs.onerror = () => refreshJobsList();
   sseJobs.onmessage = (e) => {
     try {
       const job = JSON.parse(e.data);
       if (activeJobId && job.id === activeJobId) {
+        jobMonitorEpoch++;
         displayActiveJob(job);
       }
       refreshJobsList();
@@ -657,6 +668,41 @@ function initSSEJobs() {
       console.error('Job SSE error:', err);
     }
   };
+  // Keep monitoring even when a proxy silently drops an idle SSE connection.
+  setInterval(() => refreshJobsList(), 5000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshJobsList(); });
+  window.addEventListener('online', () => refreshJobsList());
+}
+
+function rememberActiveJob(id) {
+  activeJobId = id;
+  jobMonitorEpoch++;
+  try {
+    sessionStorage.setItem('ltx.activeJobId', id);
+    const url = new URL(location.href);
+    url.searchParams.set('job', id);
+    history.replaceState(null, '', url.href);
+  } catch (_) {}
+}
+
+function clearJobMonitor() {
+  activeJobId = null;
+  jobMonitorEpoch++;
+  try {
+    sessionStorage.removeItem('ltx.activeJobId');
+    const url = new URL(location.href);
+    url.searchParams.delete('job');
+    history.replaceState(null, '', url.href);
+  } catch (_) {}
+}
+
+function reconcileJobMonitor(jobs) {
+  let selected = jobs.find(job => job.id === activeJobId);
+  if (!selected && !currentSource) {
+    selected = jobs.find(job => job.status === 'running') || jobs.find(job => job.status === 'queued');
+    if (selected) rememberActiveJob(selected.id);
+  }
+  if (selected) displayActiveJob(selected);
 }
 
 function displayActiveJob(job) {
@@ -677,6 +723,7 @@ function displayActiveJob(job) {
       return;
     }
     setTimeout(() => {
+      if (activeJobId !== job.id) return;
       card.style.display = 'none';
       idle.style.display = 'block';
     }, 4000);
@@ -825,7 +872,10 @@ async function updateHardwareTelemetry() {
     const connText = document.getElementById('conn-text');
     const vramPill = document.getElementById('vram-pill');
 
-    if (s.h3_busy) {
+    if (s.active_job) {
+      connDot.className = 'dot busy';
+      connText.innerText = 'LTX Rendering';
+    } else if (s.h3_busy) {
       connDot.className = 'dot busy';
       connText.innerText = 'H3 Studio Busy (Paused)';
     } else {
@@ -856,27 +906,37 @@ async function updateHardwareTelemetry() {
     document.getElementById('worker-status-badge').innerText = comfy.running ? 'Running' : 'Stopped';
     document.getElementById('worker-pid').innerText = comfy.pid || '--';
 
-    document.getElementById('queue-count-badge').innerText = s.queue_length || 0;
+    document.getElementById('queue-count-badge').innerText = (s.queue_length || 0) + (s.active_job ? 1 : 0);
   } catch (err) {
     document.getElementById('conn-dot').className = 'dot err';
     document.getElementById('conn-text').innerText = 'Server Disconnected';
   }
 }
 
-async function refreshJobsList() {
+function refreshJobsList() {
+  if (!jobsRefreshRequest) jobsRefreshRequest = loadJobsList().finally(() => { jobsRefreshRequest = null; });
+  return jobsRefreshRequest;
+}
+
+async function loadJobsList() {
+  const epoch = jobMonitorEpoch;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const res = await fetch('/api/jobs');
+    const res = await fetch('/api/jobs', {cache: 'no-store', signal: controller.signal});
+    if (!res.ok) throw new Error('Could not refresh job status: HTTP ' + res.status);
     const jobs = await res.json();
+    if (!Array.isArray(jobs)) throw new Error('Invalid jobs response');
+    // A delayed poll must not replace a newer SSE event or newly submitted job.
+    if (epoch === jobMonitorEpoch) reconcileJobMonitor(jobs);
     const tbody = document.getElementById('jobs-table-body');
+    const pendingCount = jobs.filter(j => j.status === 'running' || j.status === 'queued').length;
+    const badge = document.getElementById('queue-count-badge');
+    if (badge) badge.innerText = pendingCount;
     if (!jobs || jobs.length === 0) {
       tbody.innerHTML = '<tr><td colspan="8" class="empty-cell">No enhancement jobs yet.</td></tr>';
       return;
     }
-
-    // Update queue badge count
-    const pendingCount = jobs.filter(j => j.status === 'running' || j.status === 'queued').length;
-    const badge = document.getElementById('queue-count-badge');
-    if (badge) badge.innerText = pendingCount;
 
     tbody.innerHTML = '';
     jobs.forEach(j => {
@@ -907,6 +967,8 @@ async function refreshJobsList() {
     });
   } catch (err) {
     console.error('Failed to refresh jobs:', err);
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
@@ -915,7 +977,7 @@ async function retryJob(id) {
     const res = await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
     const data = await res.json();
     if (data.success && data.job) {
-      activeJobId = data.job.id;
+      rememberActiveJob(data.job.id);
       displayActiveJob(data.job);
       refreshJobsList();
       alert(`Job re-queued successfully as ${data.job.id}!`);

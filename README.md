@@ -170,6 +170,8 @@ GPU admission counts only the matching LTX worker's resident VRAM as reusable. A
 
 ## 📡 REST API Reference
 
+The browser refreshes job snapshots every five seconds as a fallback to live SSE updates, and refreshes immediately after reconnection or returning to the tab. A `?job=ltx_...` link and per-tab selection restore the tracked job after reload; a fresh page can adopt an ongoing server render. Uploading a new source leaves that draft in the editor without cancelling existing work. The queue badge includes the active LTX render.
+
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/upload` | `POST` | Upload a video file (`multipart/form-data`) |
