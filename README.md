@@ -172,6 +172,8 @@ GPU admission counts only the matching LTX worker's resident VRAM as reusable. A
 
 The browser refreshes job snapshots every five seconds as a fallback to live SSE updates, and refreshes immediately after reconnection or returning to the tab. A `?job=ltx_...` link and per-tab selection restore the tracked job after reload; a fresh page can adopt an ongoing server render. Uploading a new source leaves that draft in the editor without cancelling existing work. The queue badge includes the active LTX render.
 
+Submission and re-queue requests validate HTTP responses and job receipts, report gateway HTML without exposing a JSON parser error, and time out after 45 seconds while retaining the current source and settings. Quick Test and Full Pass cannot submit concurrently. An unconfirmed POST is never automatically repeated: check Queue & History before resubmitting because the server may already have accepted it.
+
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/upload` | `POST` | Upload a video file (`multipart/form-data`) |

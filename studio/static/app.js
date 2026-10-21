@@ -9,6 +9,7 @@ let sseInstaller = null;
 let sseJobs = null;
 let jobsRefreshRequest = null;
 let jobMonitorEpoch = 0;
+let submissionInFlight = false;
 
 document.addEventListener('DOMContentLoaded', () => {
   initNavigation();
@@ -497,7 +498,53 @@ function collectSettings(isTest = false) {
   return s;
 }
 
+async function readJobSubmission(res) {
+  const body = await res.text();
+  const status = `HTTP ${res.status}`;
+  let data;
+  try {
+    data = JSON.parse(body);
+  } catch (_) {
+    const reason = /^\s*</.test(body)
+      ? 'The server or connection gateway returned an HTML page instead of the LTX API response.'
+      : 'LTX returned an unreadable API response.';
+    throw new Error(`${status}: ${reason}`);
+  }
+  if (!res.ok || !data?.success) {
+    throw new Error(`${status}: ${typeof data?.error === 'string' ? data.error : 'LTX did not accept the request.'}`);
+  }
+  if (!data.job || !/^ltx_[a-zA-Z0-9_-]+$/.test(data.job.id || '')) {
+    throw new Error(`${status}: The response did not include a valid job receipt.`);
+  }
+  return data;
+}
+
+async function postJobSubmission(url, payload) {
+  const controller = new AbortController();
+  const deadline = setTimeout(() => controller.abort(), 45000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      ...(payload === undefined ? {} : {body: JSON.stringify(payload)}),
+      signal: controller.signal
+    });
+    return await readJobSubmission(res);
+  } catch (err) {
+    if (controller.signal.aborted) throw new Error('The submission connection timed out after 45 seconds.');
+    throw err;
+  } finally {
+    clearTimeout(deadline);
+  }
+}
+
+function submissionFailureMessage(err) {
+  return 'Submission could not be confirmed: ' + (err.message || err) +
+    '\nYour source video and settings are unchanged. Check Queue & History before submitting again to avoid a duplicate render.';
+}
+
 async function submitJob(isTest = false) {
+  if (submissionInFlight) return;
   if (!currentSource) {
     alert('Please upload a source video first.');
     return;
@@ -505,6 +552,10 @@ async function submitJob(isTest = false) {
 
   const btn = isTest ? document.getElementById('test-render-btn') : document.getElementById('enhance-btn');
   const originalHtml = btn ? btn.innerHTML : '';
+  const buttons = ['test-render-btn', 'enhance-btn'].map(id => document.getElementById(id)).filter(Boolean);
+  const disabledBefore = buttons.map(button => button.disabled);
+  submissionInFlight = true;
+  buttons.forEach(button => { button.disabled = true; });
   if (btn) {
     btn.disabled = true;
     btn.innerHTML = '<span>⏳ Starting Render...</span>';
@@ -529,35 +580,25 @@ async function submitJob(isTest = false) {
       document.getElementById('active-eta-text').innerText = 'Initializing...';
     }
 
-    const res = await fetch('/api/jobs', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        input_video_path: currentSource.filepath,
-        settings,
-        name: currentSource.filename
-      })
+    const data = await postJobSubmission('/api/jobs', {
+      input_video_path: currentSource.filepath,
+      settings,
+      name: currentSource.filename
     });
-    const data = await res.json();
-    if (data.success && data.job) {
-      rememberActiveJob(data.job.id);
-      displayActiveJob(data.job);
-      refreshJobsList();
-    } else {
-      alert('Failed to submit job: ' + (data.error || 'Unknown error'));
-      if (activeCard) activeCard.style.display = 'none';
-      if (idleCard) idleCard.style.display = 'block';
-    }
+    rememberActiveJob(data.job.id);
+    displayActiveJob(data.job);
+    refreshJobsList();
   } catch (err) {
     console.error('Submission error:', err);
-    alert('Submission network error: ' + (err.message || err));
+    alert(submissionFailureMessage(err));
     const activeCard = document.getElementById('active-job-card');
     if (activeCard) activeCard.style.display = 'none';
     const idleCard = document.getElementById('idle-monitor-card');
     if (idleCard) idleCard.style.display = 'block';
   } finally {
+    submissionInFlight = false;
+    buttons.forEach((button, index) => { button.disabled = disabledBefore[index]; });
     if (btn) {
-      btn.disabled = false;
       btn.innerHTML = originalHtml;
     }
   }
@@ -973,9 +1014,10 @@ async function loadJobsList() {
 }
 
 async function retryJob(id) {
+  if (submissionInFlight) return;
+  submissionInFlight = true;
   try {
-    const res = await fetch(`/api/jobs/${id}/retry`, { method: 'POST' });
-    const data = await res.json();
+    const data = await postJobSubmission(`/api/jobs/${id}/retry`);
     if (data.success && data.job) {
       rememberActiveJob(data.job.id);
       displayActiveJob(data.job);
@@ -985,7 +1027,9 @@ async function retryJob(id) {
       alert('Failed to re-queue job: ' + (data.error || 'Unknown error'));
     }
   } catch (err) {
-    alert('Re-queue network error: ' + err.message);
+    alert(submissionFailureMessage(err));
+  } finally {
+    submissionInFlight = false;
   }
 }
 
