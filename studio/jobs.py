@@ -133,8 +133,9 @@ class JobManager:
         return False
 
     async def delete_job(self, job_id: str) -> bool:
+        # cancel_job acquires the same non-reentrant queue lock itself.
+        await self.cancel_job(job_id)
         async with self._lock:
-            await self.cancel_job(job_id)
             if job_id in self.jobs:
                 del self.jobs[job_id]
             f = DIRS["jobs"] / f"{job_id}.json"

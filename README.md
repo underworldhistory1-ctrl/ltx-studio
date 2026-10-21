@@ -176,6 +176,8 @@ Submission and re-queue requests validate HTTP responses and job receipts, repor
 
 On `*.trycloudflare.com`, the frontend uses short JSON polling for both job and installer progress instead of opening SSE connections, which [Quick Tunnels do not support](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/). Installer snapshot requests have a 10-second deadline and coalesce while pending. Other hosts retain SSE with job polling as a fallback.
 
+Job deletion completes cancellation before acquiring its own queue lock. This prevents a nested-lock deadlock that previously left subsequent submissions, cancellations, and queue-summary requests waiting indefinitely while read-only history/status remained responsive.
+
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/upload` | `POST` | Upload a video file (`multipart/form-data`) |
