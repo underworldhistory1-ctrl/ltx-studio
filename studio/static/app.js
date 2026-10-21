@@ -10,6 +10,7 @@ let sseJobs = null;
 let jobsRefreshRequest = null;
 let jobMonitorEpoch = 0;
 let submissionInFlight = false;
+let installerRefreshRequest = null;
 
 document.addEventListener('DOMContentLoaded', () => {
   initNavigation();
@@ -614,7 +615,36 @@ async function cancelActiveJob() {
 }
 
 // ==================== SSE INSTALLER EVENTS ====================
+function usesQuickTunnel() {
+  return new URL(location.href).hostname.endsWith('.trycloudflare.com');
+}
+
+function refreshInstallerStatus() {
+  if (!installerRefreshRequest) {
+    installerRefreshRequest = (async () => {
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 10000);
+      try {
+        const res = await fetch('/api/installer/status', {cache: 'no-store', signal: controller.signal});
+        if (!res.ok) throw new Error('Installer status HTTP ' + res.status);
+        renderInstallerProgress(await res.json());
+      } catch (err) {
+        console.error('Could not refresh installer status:', err);
+      } finally {
+        clearTimeout(deadline);
+      }
+    })().finally(() => { installerRefreshRequest = null; });
+  }
+  return installerRefreshRequest;
+}
+
 function initSSEInstaller() {
+  // Quick Tunnels buffer SSE indefinitely; use bounded, coalesced snapshots.
+  if (usesQuickTunnel()) {
+    refreshInstallerStatus();
+    setInterval(() => refreshInstallerStatus(), 5000);
+    return;
+  }
   sseInstaller = new EventSource('/api/installer/events');
   sseInstaller.onmessage = (e) => {
     try {
@@ -693,22 +723,24 @@ function initSSEJobs() {
     const saved = new URL(location.href).searchParams.get('job') || sessionStorage.getItem('ltx.activeJobId');
     if (saved && /^ltx_[a-zA-Z0-9_-]+$/.test(saved)) activeJobId = saved;
   } catch (_) {}
-  sseJobs = new EventSource('/api/jobs/events');
-  // A reconnect does not replay the server's previous state transitions.
-  sseJobs.onopen = () => refreshJobsList();
-  sseJobs.onerror = () => refreshJobsList();
-  sseJobs.onmessage = (e) => {
-    try {
-      const job = JSON.parse(e.data);
-      if (activeJobId && job.id === activeJobId) {
-        jobMonitorEpoch++;
-        displayActiveJob(job);
+  if (!usesQuickTunnel()) {
+    sseJobs = new EventSource('/api/jobs/events');
+    // A reconnect does not replay the server's previous state transitions.
+    sseJobs.onopen = () => refreshJobsList();
+    sseJobs.onerror = () => refreshJobsList();
+    sseJobs.onmessage = (e) => {
+      try {
+        const job = JSON.parse(e.data);
+        if (activeJobId && job.id === activeJobId) {
+          jobMonitorEpoch++;
+          displayActiveJob(job);
+        }
+        refreshJobsList();
+      } catch (err) {
+        console.error('Job SSE error:', err);
       }
-      refreshJobsList();
-    } catch (err) {
-      console.error('Job SSE error:', err);
-    }
-  };
+    };
+  }
   // Keep monitoring even when a proxy silently drops an idle SSE connection.
   setInterval(() => refreshJobsList(), 5000);
   document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshJobsList(); });

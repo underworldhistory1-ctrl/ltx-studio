@@ -2,14 +2,14 @@ const test=require('node:test');
 const assert=require('node:assert/strict');
 const vm=require('node:vm'),fs=require('node:fs');
 function monitor(initial=[]){
- const elements=new Map(),intervals=[],timeouts=[],listeners={},memory=new Map(),calls=[],alerts=[];let jobs=initial;
+ const elements=new Map(),intervals=[],timeouts=[],streams=[],listeners={},memory=new Map(),calls=[],alerts=[];let jobs=initial;
  function element(){return {style:{},disabled:false,innerText:'',innerHTML:'',appendChild(){},classList:{add(){},remove(){}}};}
  const document={hidden:false,addEventListener:(type,fn)=>listeners[type]=fn,querySelector:()=>element(),getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);},createElement:element};
  const context={document,window:{addEventListener:(type,fn)=>listeners[type]=fn},URL,location:{href:'https://ltx.test/'},history:{replaceState(_a,_b,url){context.location.href=String(url);}},sessionStorage:{getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)},
-  EventSource:class{},setInterval:fn=>intervals.push(fn),setTimeout(fn,ms){const timer={fn,ms};timeouts.push(timer);return timer;},clearTimeout(timer){if(timer)timer.cleared=true;},console:{error(){},log(){}},alert:message=>alerts.push(message),AbortSignal,AbortController,
+  EventSource:class{constructor(url){streams.push(url);}},setInterval:fn=>intervals.push(fn),setTimeout(fn,ms){const timer={fn,ms};timeouts.push(timer);return timer;},clearTimeout(timer){if(timer)timer.cleared=true;},console:{error(){},log(){}},alert:message=>alerts.push(message),AbortSignal,AbortController,
   fetch:async(url)=>{calls.push(url);return {ok:true,json:async()=>url==='/api/status'?{gpu:{},comfy:{},active_job:true,queue_length:0}:jobs};}};
- vm.createContext(context);vm.runInContext(fs.readFileSync('studio/static/app.js','utf8')+';globalThis.monitor={initSSEJobs,refreshJobsList,updateHardwareTelemetry,source:renderSourceMedia,submit:submitJob,retry:retryJob,prepare:()=>{currentSource={filename:"Scene.mp4",filepath:"/inputs/scene.mp4"};collectSettings=()=>({mode:"refine"});},select:id=>activeJobId=id,id:()=>activeJobId,stream:()=>sseJobs};',context);
- return {api:context.monitor,context,elements,intervals,timeouts,listeners,memory,calls,alerts,setJobs:value=>jobs=value};
+ vm.createContext(context);vm.runInContext(fs.readFileSync('studio/static/app.js','utf8')+';globalThis.monitor={initSSEJobs,initSSEInstaller,refreshJobsList,updateHardwareTelemetry,source:renderSourceMedia,submit:submitJob,retry:retryJob,prepare:()=>{currentSource={filename:"Scene.mp4",filepath:"/inputs/scene.mp4"};collectSettings=()=>({mode:"refine"});},select:id=>activeJobId=id,id:()=>activeJobId,stream:()=>sseJobs};',context);
+ return {api:context.monitor,context,elements,intervals,timeouts,streams,listeners,memory,calls,alerts,setJobs:value=>jobs=value};
 }
 const queued={id:'ltx_user',name:'Scene.mp4',status:'queued',queue_position:1,stage:'Waiting for H3',progress:0,settings:{mode:'refine'}};
 const running={...queued,status:'running',queue_position:0,stage:'Rendering chunk 1/1',progress:25,step:2,max_steps:8};
@@ -82,4 +82,17 @@ test('a stalled submission times out, releases both buttons, and is not automati
 test('a successful response without a job receipt cannot masquerade as an accepted render',async()=>{
  const m=monitor();m.api.prepare();m.context.fetch=async()=>new Response(JSON.stringify({success:true}),{status:200,headers:{'Content-Type':'application/json'}});
  await m.api.submit();assert.equal(m.api.id(),null);assert.match(m.alerts[0],/valid job receipt/);
+});
+
+test('Quick Tunnel uses short snapshots for jobs and installer without opening unsupported SSE streams',async()=>{
+ const m=monitor([running]);m.context.location.href='https://senate-striking-refine-babies.trycloudflare.com/';
+ m.context.fetch=async url=>{m.calls.push(url);return {ok:true,json:async()=>url==='/api/installer/status'?{status:'done',current:null}: [running]};};
+ m.api.initSSEJobs();m.api.initSSEInstaller();await Promise.all(m.intervals.map(fn=>fn()));
+ assert.deepEqual(m.streams,[]);assert.equal(m.api.id(),running.id);assert.ok(m.calls.includes('/api/installer/status'));assert.equal(m.elements.get('install-banner').style.display,'none');
+});
+
+test('Quick Tunnel installer snapshots coalesce and recover after a failed response',async()=>{
+ const m=monitor();m.context.location.href='https://example.trycloudflare.com/';let resolve,requests=0;
+ m.context.fetch=()=>{requests++;return new Promise(done=>resolve=done);};m.api.initSSEInstaller();const tick=m.intervals[0]();assert.equal(requests,1);
+ resolve({ok:false,status:502});await tick;m.context.fetch=async()=>{requests++;return {ok:true,json:async()=>({status:'done',current:null})};};await m.intervals[0]();assert.equal(requests,2);assert.equal(m.elements.get('install-banner').style.display,'none');
 });

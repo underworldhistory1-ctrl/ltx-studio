@@ -174,6 +174,8 @@ The browser refreshes job snapshots every five seconds as a fallback to live SSE
 
 Submission and re-queue requests validate HTTP responses and job receipts, report gateway HTML without exposing a JSON parser error, and time out after 45 seconds while retaining the current source and settings. Quick Test and Full Pass cannot submit concurrently. An unconfirmed POST is never automatically repeated: check Queue & History before resubmitting because the server may already have accepted it.
 
+On `*.trycloudflare.com`, the frontend uses short JSON polling for both job and installer progress instead of opening SSE connections, which [Quick Tunnels do not support](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/). Installer snapshot requests have a 10-second deadline and coalesce while pending. Other hosts retain SSE with job polling as a fallback.
+
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/upload` | `POST` | Upload a video file (`multipart/form-data`) |
