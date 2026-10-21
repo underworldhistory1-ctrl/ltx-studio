@@ -642,6 +642,8 @@ def phase_nodes(st, root, args):
         shutil.rmtree(dst)
     shutil.copytree(src, dst)
     st.log("copied ReDetail cond-cache node")
+    shutil.copytree(PROJECT / "comfy_nodes" / "studio_shared_gpu", cn / "studio_shared_gpu", dirs_exist_ok=True)
+    st.log("copied optional shared-GPU queue admission node")
     st.phase("nodes", "done")
 
 

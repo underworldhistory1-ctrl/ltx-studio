@@ -178,6 +178,12 @@ On `*.trycloudflare.com`, the frontend uses short JSON polling for both job and 
 
 Job deletion completes cancellation before acquiring its own queue lock. This prevents a nested-lock deadlock that previously left subsequent submissions, cancellations, and queue-summary requests waiting indefinitely while read-only history/status remained responsive.
 
+### Sharing one Linux GPU with H3
+
+Install `comfy_nodes/studio_shared_gpu` under the LTX worker's `custom_nodes` (the installer does this), and update H3 with its matching `h3_shared_gpu.py`. Enable both workers with the same `STUDIO_SHARED_GPU_LOCK` absolute path, for example `/output/studio-shared-gpu-0.lock`. Set `STUDIO_SHARED_GPU_PEER=http://127.0.0.1:8188` for LTX and `http://127.0.0.1:8189` for H3. Restart only idle workers after configuring these variables.
+
+Both workers reserve that device lease before removing a prompt from their native queue and release it after execution, including errors. A waiting prompt remains visible and cancellable. Idle workers return regularly to process cache-release requests. Admission checks the peer queue and available CUDA memory, requesting GPU-only model unloading from an idle peer when needed; RAM model caches are retained. Uncertain peer state leaves work queued. Configuration is opt-in and Linux-only; single-worker installations are unchanged.
+
 | Endpoint | Method | Description |
 | :--- | :--- | :--- |
 | `/api/upload` | `POST` | Upload a video file (`multipart/form-data`) |
