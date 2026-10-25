@@ -592,7 +592,7 @@ def phase_venv(st, root, args):
     cons = root / "config" / "constraints.txt"
     cons.parent.mkdir(parents=True, exist_ok=True)
     lines = []
-    for pkg in ("torch", "torchvision", "torchaudio", "numpy", "triton", "opencv-python-headless"):
+    for pkg in ("torch", "torchvision", "torchaudio", "numpy", "triton"):
         r = subprocess.run([str(base_py), "-m", "pip", "show", pkg], capture_output=True, text=True)
         for l in r.stdout.splitlines():
             if l.startswith("Version:"):
@@ -644,6 +644,17 @@ def phase_nodes(st, root, args):
     st.log("copied ReDetail cond-cache node")
     shutil.copytree(PROJECT / "comfy_nodes" / "studio_shared_gpu", cn / "studio_shared_gpu", dirs_exist_ok=True)
     st.log("copied optional shared-GPU queue admission node")
+    # Base environments may contain overlapping OpenCV distributions. Metadata can
+    # claim headless 4.x is installed while cv2 actually imports incompatible 5.x.
+    # Install our own copy without uninstalling or modifying the shared base env.
+    run([venv_python(root), "-m", "pip", "install", "--no-input",
+         "--ignore-installed", "--no-deps", "opencv-python-headless==4.13.0.92"], st, phase="nodes")
+    run([venv_python(root), "-c",
+         "import cv2,sys; from pathlib import Path; "
+         "assert Path(cv2.__file__).resolve().is_relative_to(Path(sys.prefix).resolve()), cv2.__file__; "
+         "assert hasattr(cv2, 'CascadeClassifier'), cv2.__file__; "
+         "c=cv2.CascadeClassifier(cv2.data.haarcascades+'haarcascade_frontalface_default.xml'); "
+         "assert not c.empty(), 'OpenCV face cascade data missing'"], st, phase="nodes")
     st.phase("nodes", "done")
 
 
