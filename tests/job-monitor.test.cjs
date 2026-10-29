@@ -4,7 +4,7 @@ const vm=require('node:vm'),fs=require('node:fs');
 function monitor(initial=[]){
  const elements=new Map(),intervals=[],timeouts=[],streams=[],listeners={},memory=new Map(),calls=[],alerts=[];let jobs=initial;
  function element(){return {style:{},disabled:false,innerText:'',innerHTML:'',appendChild(){},classList:{add(){},remove(){}}};}
- const document={hidden:false,addEventListener:(type,fn)=>listeners[type]=fn,querySelector:()=>element(),getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);},createElement:element};
+ const document={hidden:false,addEventListener:(type,fn)=>listeners[type]=fn,querySelector:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);},getElementById:id=>{if(!elements.has(id))elements.set(id,element());return elements.get(id);},createElement:element};
  const context={document,window:{addEventListener:(type,fn)=>listeners[type]=fn},URL,location:{href:'https://ltx.test/'},history:{replaceState(_a,_b,url){context.location.href=String(url);}},sessionStorage:{getItem:k=>memory.get(k),setItem:(k,v)=>memory.set(k,v),removeItem:k=>memory.delete(k)},
   EventSource:class{constructor(url){streams.push(url);}},setInterval:fn=>intervals.push(fn),setTimeout(fn,ms){const timer={fn,ms};timeouts.push(timer);return timer;},clearTimeout(timer){if(timer)timer.cleared=true;},console:{error(){},log(){}},alert:message=>alerts.push(message),AbortSignal,AbortController,
   fetch:async(url)=>{calls.push(url);return {ok:true,json:async()=>url==='/api/status'?{gpu:{},comfy:{},active_job:true,queue_length:0}:jobs};}};
@@ -13,6 +13,25 @@ function monitor(initial=[]){
 }
 const queued={id:'ltx_user',name:'Scene.mp4',status:'queued',queue_position:1,stage:'Waiting for H3',progress:0,settings:{mode:'refine'}};
 const running={...queued,status:'running',queue_position:0,stage:'Rendering chunk 1/1',progress:25,step:2,max_steps:8};
+
+test('failure replaces every queued label and renders its error as text',async()=>{
+ const m=monitor([queued]);m.api.select(queued.id);await m.api.refreshJobsList();
+ m.setJobs([{...queued,status:'failed',error:'Missing model <img src=x onerror=alert(1)>'}]);await m.api.refreshJobsList();
+ assert.equal(m.elements.get('.active-job-badge').innerText,'FAILED');
+ assert.equal(m.elements.get('active-progress-pct').innerText,'Failed');
+ assert.doesNotMatch(m.elements.get('active-step-info').innerText,/Waiting/);
+ assert.doesNotMatch(m.elements.get('pill-chunk').innerText,/Queue/);
+ assert.match(m.elements.get('active-stage-text').innerText,/Missing model <img/);
+ assert.equal(m.elements.get('cancel-active-btn').style.display,'none');
+});
+test('cancelled task never retains the old queued or failed display',async()=>{
+ const m=monitor([queued]);m.api.select(queued.id);await m.api.refreshJobsList();
+ m.setJobs([{...queued,status:'cancelled',error:'Old missing-model failure'}]);await m.api.refreshJobsList();
+ assert.equal(m.elements.get('.active-job-badge').innerText,'CANCELLED');
+ assert.equal(m.elements.get('active-progress-pct').innerText,'Cancelled');
+ assert.doesNotMatch(m.elements.get('active-stage-text').innerText,/missing-model/);
+ m.setJobs([running]);await m.api.refreshJobsList();assert.equal(m.elements.get('cancel-active-btn').style.display,'');
+});
 test('polling repairs a missed queued-to-running SSE transition',async()=>{
  const m=monitor([queued]);m.api.select(queued.id);m.api.initSSEJobs();await m.api.refreshJobsList();assert.match(m.elements.get('active-progress-pct').innerText,/Queued/);
  m.setJobs([running]);assert.ok(m.intervals.length,'monitor must poll independently of SSE');await m.intervals[0]();assert.equal(m.elements.get('active-step-info').innerText,'Step 2/8');assert.equal(m.elements.get('active-progress-pct').innerText,'25.0%');

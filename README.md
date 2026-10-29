@@ -21,6 +21,7 @@ An enterprise-grade, turnkey **Video-to-Video (V2V) Enhancement, Upscaling, and 
 * **Smart Multi-Stack Queue Coordination**:
   * Built-in mutual exclusion detecting active renders on shared GPU environments (such as **MiniMax H3** on port `8188`).
   * Automatically pauses LTX renders in queue, monitors GPU memory, flushes VRAM cache, and seamlessly resumes when the GPU becomes available.
+  * Waiting for H3 leaves queue submission and cancellation responsive. Failed and cancelled jobs show terminal status throughout the monitor, without retaining old queue positions or GPU-wait labels.
 * **Lossless Audio Preservation**:
   * Extracts multi-channel audio from source footage, calculates exact temporal alignment to $8n+1$ latent frame boundaries, and remuxes losslessly via FFmpeg.
 * **Modern Web Interface**:

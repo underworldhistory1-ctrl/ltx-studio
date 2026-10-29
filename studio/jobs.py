@@ -57,9 +57,8 @@ class JobManager:
 
     async def submit_job(self, input_video_path: str, settings: dict, name: str = None) -> dict:
         job_id = new_id("ltx")
-        
+        h3_busy = await self._check_h3_busy()
         async with self._lock:
-            h3_busy = await self._check_h3_busy()
             is_busy = bool(self.active_job or self.queue or h3_busy)
             pos = len(self.queue) + (1 if self.active_job or h3_busy else 0)
 
@@ -92,8 +91,8 @@ class JobManager:
         return res[:limit]
 
     async def get_queue_summary(self) -> dict:
+        h3_busy = await self._check_h3_busy()
         async with self._lock:
-            h3_busy = await self._check_h3_busy()
             q_list = []
             for i, qid in enumerate(self.queue):
                 j = self.jobs.get(qid)
@@ -126,6 +125,7 @@ class JobManager:
             job = self.jobs.get(job_id)
             if job:
                 job["status"] = "cancelled"
+                job["queue_position"] = 0
                 job["stage"] = "Cancelled by user"
                 job["eta_text"] = "Cancelled"
                 self._notify(job)
@@ -152,8 +152,16 @@ class JobManager:
     async def _worker_loop(self):
         while True:
             job_to_run = None
+            # Never hold the queue lock during network/GPU checks or sleeps:
+            # submissions and cancellation must stay available while H3 renders.
             async with self._lock:
-                if self.queue:
+                candidate = self.queue[0] if self.queue else None
+            h3_busy = False
+            if candidate:
+                await self.engine.free_h3_cache()
+                h3_busy = await self._check_h3_busy()
+            async with self._lock:
+                if candidate and self.queue and self.queue[0] == candidate:
                     # Look at next job in queue without popping yet
                     next_id = self.queue[0]
                     job = self.jobs.get(next_id)
@@ -163,33 +171,26 @@ class JobManager:
 
                     # Release only a verified idle H3 cache before the admission guard.
                     # An active queue is never asked to unload.
-                    await self.engine.free_h3_cache()
-                    # Check if shared GPU is currently busy with H3 render
-                    h3_busy = await self._check_h3_busy()
                     if h3_busy:
                         job["status"] = "queued"
                         job["stage"] = "Waiting in queue: GPU is currently busy with H3 render. Will start automatically..."
                         job["eta_text"] = "Waiting for H3..."
                         self._notify(job)
-                        await asyncio.sleep(3.0)
-                        continue
-
-                    # GPU is free - take this job from queue
-                    self.queue.pop(0)
-                    job_to_run = job
-                    job_to_run["queue_position"] = 0
-                    
-                    # Update queue positions for remaining queued jobs
-                    for i, qid in enumerate(self.queue):
-                        qj = self.jobs.get(qid)
-                        if qj and qj.get("status") == "queued":
-                            qj["queue_position"] = i + 1
-                            qj["stage"] = f"Waiting in queue (Position #{i + 1})..."
-                            self._notify(qj)
+                    else:
+                        self.queue.pop(0)
+                        job_to_run = job
+                        job_to_run["queue_position"] = 0
+                        self.active_job = job_to_run
+                        for i, qid in enumerate(self.queue):
+                            qj = self.jobs.get(qid)
+                            if qj and qj.get("status") == "queued":
+                                qj["queue_position"] = i + 1
+                                qj["stage"] = f"Waiting in queue (Position #{i + 1})..."
+                                self._notify(qj)
 
             if job_to_run:
-                self.active_job = job_to_run
                 try:
+                    if job_to_run.get('status') == 'cancelled':raise JobCancelled()
                     await self.engine.execute(job_to_run, self._notify)
                 except JobCancelled:
                     job_to_run["status"] = "cancelled"
@@ -198,10 +199,12 @@ class JobManager:
                 except Exception as e:
                     logger.exception(f"Job {job_to_run['id']} execution error: {e}")
                     job_to_run["status"] = "failed"
+                    job_to_run["queue_position"] = 0
+                    job_to_run["eta_text"] = "Failed"
                     job_to_run["error"] = str(e)
                     job_to_run["stage"] = f"Failed: {str(e)[:200]}"
                     self._notify(job_to_run)
                 finally:
                     self.active_job = None
 
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(3.0 if h3_busy else 1.0)

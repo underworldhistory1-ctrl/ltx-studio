@@ -220,6 +220,8 @@ class Engine:
             return await self._execute(job, on_update)
 
     async def _execute(self, job: dict, on_update):
+        if job.get('status') == 'cancelled':
+            raise JobCancelled()
         job_id = job["id"]
         src = job["input_video_path"]
         settings = job["settings"]

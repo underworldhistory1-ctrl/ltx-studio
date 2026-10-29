@@ -69,6 +69,24 @@ class QueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(await asyncio.wait_for(self.manager.delete_job('ltx_missing'), 0.5))
         await self.submit()
 
+    async def test_waiting_for_h3_does_not_lock_new_submissions_or_cancellation(self):
+        first=await self.submit()
+        waiting=asyncio.Event()
+        self.engine.free_h3_cache=AsyncMock()
+        def notice(job):
+            if 'currently busy' in job.get('stage',''):waiting.set()
+        self.manager.subscribe(notice)
+        worker=asyncio.create_task(self.manager._worker_loop())
+        try:
+            await asyncio.wait_for(waiting.wait(),1)
+            second=await asyncio.wait_for(self.submit('Second.mp4'),.2)
+            await asyncio.wait_for(self.manager.cancel_job(second['id']),.2)
+            self.assertIn(first['id'],self.manager.queue)
+            self.assertEqual(second['status'],'cancelled')
+        finally:
+            worker.cancel()
+            with self.assertRaises(asyncio.CancelledError):await worker
+
 
 if __name__ == '__main__':
     unittest.main()

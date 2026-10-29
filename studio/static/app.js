@@ -781,25 +781,35 @@ function reconcileJobMonitor(jobs) {
 function displayActiveJob(job) {
   const card = document.getElementById('active-job-card');
   const idle = document.getElementById('idle-monitor-card');
+  const terminal = ['completed', 'failed', 'cancelled'].includes(job.status);
+  document.getElementById('cancel-active-btn').style.display = terminal ? 'none' : '';
 
   if (job.status === 'completed' || job.status === 'failed' || job.status === 'cancelled') {
     if (job.status === 'completed') {
       showComparisonResult(job);
       return;
     }
-    if (job.status === 'failed') {
-      card.style.display = 'block';
-      idle.style.display = 'none';
-      document.getElementById('job-title').innerText = `Job Failed: ${job.name || job.id}`;
-      document.getElementById('active-stage-text').innerHTML = `<span style="color:#ef4444; font-weight:600;">Error: ${job.error || 'Execution failed. Check Queue tab for logs.'}</span>`;
-      document.getElementById('active-progress-fill').style.backgroundColor = '#ef4444';
-      return;
+    const failed = job.status === 'failed';
+    const label = failed ? 'Failed' : 'Cancelled';
+    card.style.display = 'block';idle.style.display = 'none';
+    const badge = document.querySelector('.active-job-badge');
+    if (badge) {
+      badge.innerText = label.toUpperCase();
+      badge.style.background = failed ? 'rgba(239,68,68,.15)' : 'rgba(160,160,160,.15)';
+      badge.style.color = failed ? '#ef4444' : 'var(--muted)';
     }
-    setTimeout(() => {
-      if (activeJobId !== job.id) return;
-      card.style.display = 'none';
-      idle.style.display = 'block';
-    }, 4000);
+    document.getElementById('job-title').innerText = `Job ${label}: ${job.name || job.id}`;
+    document.getElementById('active-stage-text').innerText = failed ? `Error: ${job.error || 'Execution failed. Check Queue tab for logs.'}` : 'Cancelled by user. Re-queue from Queue & History when ready.';
+    document.getElementById('active-stage-text').style.color = failed ? '#ef4444' : 'var(--muted)';
+    document.getElementById('active-progress-fill').style.backgroundColor = failed ? '#ef4444' : 'var(--muted)';
+    document.getElementById('active-progress-fill').style.width = failed ? '100%' : '0%';
+    document.getElementById('active-progress-pct').innerText = label;
+    document.getElementById('active-step-info').innerText = 'Stopped';
+    document.getElementById('active-eta-text').innerText = label;
+    document.getElementById('pill-chunk').innerText = label;
+    document.getElementById('pill-elapsed').innerText = 'Stopped';
+    document.getElementById('pill-mode').innerText = `Mode: ${job.settings?.mode || 'Refine'}`;
+    document.getElementById('pill-target').innerText = job.geometry ? `${job.geometry.tw}x${job.geometry.th}` : '--';
     return;
   }
 
