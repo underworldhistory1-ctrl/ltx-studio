@@ -558,15 +558,15 @@ def pip(st, root, args, phase):
         raise RuntimeError("pip install failed: " + out[-400:])
 
 
-def phase_venv(st, root, args):
+def phase_venv(st, root, args, base_candidates=None):
     st.phase("venv", "running", 10)
     py = venv_python(root)
     # Determine the host/system base python that has PyTorch and CUDA
-    base_candidates = [Path(sys.executable), Path("/opt/venv/bin/python"), Path("/workspace/venv/bin/python")]
+    base_candidates = base_candidates if base_candidates is not None else [Path(sys.executable), Path("/opt/venv/bin/python"), Path("/workspace/venv/bin/python")]
     base_sp = None
     base_py = Path(sys.executable)
     for cand in base_candidates:
-        if cand.exists() and cand.resolve() != py.resolve():
+        if cand.exists() and cand.absolute() != py.absolute():
             try:
                 sp = subprocess.check_output([str(cand), "-c", "import site;print(site.getsitepackages()[0])"], text=True).strip()
                 if Path(sp).exists() and (Path(sp) / "torch").exists():
