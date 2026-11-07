@@ -128,7 +128,14 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
         if "5516:4984" in pr:
             pr["5516:4984"]["inputs"]["sigmas"] = settings["sigmas_custom"]
 
-    # 5. Model Precision (INT8 ConvRot vs GGUF)
+    # 5. Model Precision (INT8 ConvRot vs GGUF) & VAE selection
+    v_vae = (settings.get("video_vae") or "").strip()
+    a_vae = (settings.get("audio_vae") or "").strip()
+    if v_vae and "5004:5601" in pr and "inputs" in pr["5004:5601"]:
+        pr["5004:5601"]["inputs"]["vae_name"] = v_vae
+    if a_vae and "5004:5600" in pr and "inputs" in pr["5004:5600"]:
+        pr["5004:5600"]["inputs"]["vae_name"] = a_vae
+
     precision = settings.get("precision", "int8")
     if precision == "gguf":
         gguf_name = settings.get("gguf_file", "LTX-2.5-Distilled-Q4_K_M.gguf")
@@ -139,10 +146,10 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
 
     # 6. Prompts & Conditioning
     has_custom_prompts = bool((settings.get("prompt_positive") or "").strip() or (settings.get("prompt_negative") or "").strip())
-    use_cache = settings.get("cached_cond", True) and not has_custom_prompts and not is_pixel
+    use_cache = settings.get("cached_cond", True) and (is_pixel or not has_custom_prompts)
 
     if use_cache:
-        cond_name = "redetail_refine"
+        cond_name = "redetail" if is_pixel else "redetail_refine"
         pr = apply_cached_conditioning(pr, cond_name, N_SAVE)
     else:
         # Custom or standard text encoder
@@ -162,14 +169,20 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
             if neg_p and "5509" in pr:
                 pr["5509"]["inputs"]["value"] = neg_p
 
-    # 7. VAE Decode Tiled settings
+    # 7. Ensure CreateVideo explicitly sets sRGB (BT.709 matrix) across all modes
+    cv_node = pr.get("5518:4849")
+    if cv_node and "inputs" in cv_node:
+        cv_node["inputs"].setdefault("color_space", "sRGB")
+        cv_node["inputs"].setdefault("codec", "none")
+
+    # 8. VAE Decode Tiled settings (default 0 -> 1024 with 128px overlap to prevent 512px tile seams)
     dec_tile = int(settings.get("decode_tile", 0))
     dec_temp = int(settings.get("decode_temporal", 0))
     vaedec_node = pr.get("5518:5538")
     if vaedec_node and "inputs" in vaedec_node:
-        if dec_tile > 0:
-            vaedec_node["inputs"]["tile_size"] = dec_tile
-            vaedec_node["inputs"]["overlap"] = min(vaedec_node["inputs"].get("overlap", 64), max(16, dec_tile // 8))
+        eff_tile = dec_tile if dec_tile > 0 else 1024
+        vaedec_node["inputs"]["tile_size"] = eff_tile
+        vaedec_node["inputs"]["overlap"] = max(32, min(128, (eff_tile // 8) // 32 * 32))
         if dec_temp > 0:
             vaedec_node["inputs"]["temporal_size"] = dec_temp
             vaedec_node["inputs"]["temporal_overlap"] = min(vaedec_node["inputs"].get("temporal_overlap", 32), max(8, dec_temp // 4))

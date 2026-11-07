@@ -83,6 +83,7 @@ def probe_video(video_path: str):
         "width": width,
         "height": height,
         "fps": fps,
+        "r_frame_rate": r_fps,
         "frames": nb or max(1, round(dur * fps)),
         "duration": dur,
         "codec": codec,

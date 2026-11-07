@@ -384,27 +384,57 @@ function applyPreset(presetKey) {
   if (!p || !p.settings) return;
   const s = p.settings;
 
-  if (s.mode) {
-    document.querySelectorAll('.mode-card').forEach(c => {
-      c.classList.toggle('active', c.dataset.mode === s.mode);
-    });
-  }
+  const mode = s.mode || 'refine';
+  document.querySelectorAll('.mode-card').forEach(c => {
+    c.classList.toggle('active', c.dataset.mode === mode);
+  });
+  const rfRow = document.getElementById('restore-first-row');
+  if (rfRow) rfRow.style.display = (mode === 'refine') ? 'block' : 'none';
+  document.getElementById('restore-first-chk').checked = Boolean(s.restore_first && mode === 'refine');
+
+  const resMode = s.resolution_mode || 'scale';
+  document.querySelectorAll('.res-tab').forEach(t => {
+    t.classList.toggle('active', t.dataset.resmode === resMode);
+  });
+  const isScale = resMode === 'scale';
+  document.getElementById('scale-control-wrap').style.display = isScale ? 'block' : 'none';
+  document.getElementById('preset-control-wrap').style.display = isScale ? 'none' : 'block';
+
   if (s.scale !== undefined) {
     document.getElementById('scale-slider').value = s.scale;
     document.getElementById('scale-val').innerText = `${s.scale.toFixed(2)}x`;
   }
+  if (s.preset_long_edge !== undefined) {
+    document.getElementById('long-edge-select').value = String(s.preset_long_edge);
+  }
   if (s.guide_strength !== undefined) {
     document.getElementById('guide-slider').value = s.guide_strength;
     document.getElementById('guide-val').innerText = s.guide_strength.toFixed(2);
+    document.getElementById('guide-warning').style.display = (s.guide_strength < 0.6) ? 'block' : 'none';
   }
   if (s.color_enabled !== undefined) document.getElementById('color-enable-chk').checked = s.color_enabled;
+  if (s.color_auto !== undefined) document.getElementById('color-auto-chk').checked = s.color_auto;
   if (s.color_mode) document.getElementById('color-mode-select').value = s.color_mode;
   if (s.color_strength !== undefined) {
     document.getElementById('color-str-slider').value = s.color_strength;
     document.getElementById('color-str-val').innerText = s.color_strength.toFixed(2);
   }
-  if (s.precision) document.getElementById('precision-select').value = s.precision;
-  if (s.cached_cond !== undefined) document.getElementById('cached-cond-chk').checked = s.cached_cond;
+  if (s.protect_faces !== undefined) document.getElementById('protect-faces-chk').checked = s.protect_faces;
+
+  const prec = s.precision || 'int8';
+  document.getElementById('precision-select').value = prec;
+  document.getElementById('gguf-file-row').style.display = (prec === 'gguf') ? 'block' : 'none';
+
+  if (s.cached_cond !== undefined) {
+    document.getElementById('cached-cond-chk').checked = s.cached_cond;
+    document.getElementById('custom-encoder-sub').style.display = s.cached_cond ? 'none' : 'block';
+  }
+  if (s.decode_tile !== undefined) {
+    document.getElementById('decode-tile-input').value = s.decode_tile;
+  }
+  if (s.budget_fmp !== undefined) {
+    document.getElementById('budget-input').value = s.budget_fmp;
+  }
 
   updateGeometryCalculation();
 }
@@ -447,9 +477,10 @@ function collectSettings(isTest = false) {
 
     // Color consistency
     color_enabled: getChecked('color-enable-chk', true),
-    color_auto: getChecked('color-auto-chk', true),
+    color_auto: getChecked('color-auto-chk', false),
     color_mode: getVal('color-mode-select', 'source') || 'source',
-    color_strength: getFloat('color-str-slider', 0.7),
+    color_strength: getFloat('color-str-slider', 0.85),
+    color_match_std: true,
     protect_faces: getChecked('protect-faces-chk', true),
     protect_skin: getChecked('protect-skin-chk', false) ? 0.6 : 0.0,
 
@@ -473,7 +504,7 @@ function collectSettings(isTest = false) {
     tile_mode: getVal('tile-mode-select', 'auto') || 'auto',
     tile_w: getInt('tile-w', 1024),
     tile_h: getInt('tile-h', 576),
-    decode_tile: getInt('decode-tile-input', 0),
+    decode_tile: getInt('decode-tile-input', 1024),
 
     // Memory
     budget_fmp: getFloat('budget-input', 0.0),
@@ -1030,10 +1061,15 @@ async function loadJobsList() {
       const isFailedOrCancelled = j.status === 'failed' || j.status === 'cancelled';
       const isQueued = j.status === 'queued';
 
+      const modeLabel = (j.settings && j.settings.mode === 'refine' && j.settings.restore_first)
+        ? 'restore+refine'
+        : (j.settings ? j.settings.mode : 'refine');
+      const srcName = j.name || (j.input_video_path || '').split('/').pop() || j.id;
+
       tr.innerHTML = `
         <td><strong>${j.id}</strong></td>
-        <td>${j.name || Path(j.input_video_path).name}</td>
-        <td><span class="badge">${j.settings ? j.settings.mode : 'refine'}</span></td>
+        <td>${srcName}</td>
+        <td><span class="badge">${modeLabel}</span></td>
         <td>${geomStr}</td>
         <td>${timeStr}</td>
         <td>${dur}</td>

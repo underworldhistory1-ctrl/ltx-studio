@@ -1,13 +1,13 @@
 """LTX Video Enhancement Engine: Smart Chunking, Pre-flight validation,
 ComfyUI execution, Assembly, Audio preservation, and Color consistency."""
-import asyncio, copy, json, math, os, shutil, subprocess, time, uuid
+import asyncio, copy, json, math, os, random, shutil, subprocess, time, uuid
 from pathlib import Path
 
 import aiohttp
 import psutil
 
 from common import ROOT, DIRS, load_config, atomic_write_json, read_json, fmt_eta
-from video import probe_video, detect_scene_cuts, target_resolution, smart_chunking, render_length_8n1
+from video import probe_video, detect_scene_cuts, target_resolution, solve_dims, smart_chunking, render_length_8n1
 from graph import build_workflow
 from comfy import ComfyClient, PromptRejected
 import colorfix
@@ -186,7 +186,9 @@ class Engine:
         else:
             required.append(("DiT INT8 Transformer", mdir / "diffusion_models" / "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"))
 
-        if not cached and not (mode == "pixel"):
+        has_custom_prompts = bool((settings.get("prompt_positive") or "").strip() or (settings.get("prompt_negative") or "").strip())
+        use_cache = cached and (mode == "pixel" or not has_custom_prompts)
+        if not use_cache:
             enc = settings.get("encoder") or "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
             required.append(("Text Encoder", mdir / "text_encoders" / enc))
 
@@ -195,6 +197,8 @@ class Engine:
         elif mode == "restore":
             required.append(("Restore IC-LoRA", mdir / "loras" / "ltx-2.5-22b-ic-lora-restore-1.0.safetensors"))
         else:
+            if settings.get("restore_first", False):
+                required.append(("Restore IC-LoRA", mdir / "loras" / "ltx-2.5-22b-ic-lora-restore-1.0.safetensors"))
             required.append(("Refine IC-LoRA", mdir / "loras" / "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors"))
 
         missing = []
@@ -219,12 +223,116 @@ class Engine:
                 self._idle_free_task = None
             return await self._execute(job, on_update)
 
+    async def _run_comfy_prompt(self, job: dict, prompt: dict, extra: dict, dst_path: Path, exp_w: int, exp_h: int, on_update, t_start: float, idx: int, num_chunks: int, pass_idx: int = 0, num_passes: int = 1):
+        await self.release_temporary_memory()
+        prompt_id = await self.comfy.submit(prompt, extra=extra)
+        job["prompt_id"] = prompt_id
+
+        stop_ev = asyncio.Event()
+
+        def on_ws(evt_type, data):
+            if evt_type == "progress":
+                val = data.get("value", 0)
+                m = data.get("max", 8)
+                job["step"] = val
+                job["max_steps"] = m
+                step_frac = val / max(1, m)
+                pass_frac = (pass_idx + step_frac) / max(1, num_passes)
+                chunk_frac = (idx + pass_frac) / max(1, num_chunks)
+                job["progress"] = round(5.0 + chunk_frac * 80.0, 1)
+                elapsed = time.time() - t_start
+                if chunk_frac > 0:
+                    total_est = elapsed / chunk_frac
+                    rem = max(0.0, total_est - elapsed)
+                    job["eta_text"] = fmt_eta(rem)
+                    job["eta_seconds"] = round(rem)
+                on_update(job)
+            elif evt_type == "execution_error":
+                job["error"] = data.get("exception_message")
+
+        ws_task = asyncio.create_task(self.comfy.watch(prompt_id, on_ws, stop_ev))
+
+        history_item = None
+        not_found_ticks = 0
+        while True:
+            if job.get("status") == "cancelled":
+                await self.comfy.interrupt()
+                stop_ev.set()
+                ws_task.cancel()
+                raise JobCancelled()
+            try:
+                h = await self.comfy.history(prompt_id)
+                if prompt_id in h:
+                    st = h[prompt_id].get("status", {})
+                    if st.get("status_str") == "success":
+                        out = h[prompt_id].get("outputs", {}).get("4852", {})
+                        for k in ("video", "videos", "gifs", "images"):
+                            for itm in out.get(k) or []:
+                                if itm.get("type", "output") == "output":
+                                    history_item = itm
+                                    break
+                        break
+                    else:
+                        msgs = st.get("messages", [])
+                        err_txt = "ComfyUI execution failed"
+                        for m in msgs:
+                            if len(m) > 1 and isinstance(m[1], dict):
+                                if "exception_message" in m[1]:
+                                    err_txt = m[1]["exception_message"]
+                                elif "node_errors" in m[1]:
+                                    err_txt = "Node error: " + str(m[1]["node_errors"])
+                        raise RuntimeError(err_txt)
+                else:
+                    try:
+                        q = await self.comfy.queue()
+                        running = any(item[1] == prompt_id for item in q.get("queue_running", []))
+                        pending = any(item[1] == prompt_id for item in q.get("queue_pending", []))
+                        if not running and not pending:
+                            not_found_ticks += 1
+                            if not_found_ticks >= 6:
+                                raise RuntimeError("ComfyUI worker restarted or prompt lost from queue")
+                        else:
+                            not_found_ticks = 0
+                    except Exception as q_err:
+                        if "restarted" in str(q_err):
+                            raise
+            except (PromptRejected, RuntimeError):
+                stop_ev.set()
+                ws_task.cancel()
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(2)
+
+        stop_ev.set()
+        ws_task.cancel()
+        await self.release_temporary_memory()
+
+        if not history_item:
+            raise RuntimeError(f"Chunk {idx} produced no output file")
+
+        await self.comfy.download(history_item, str(dst_path))
+
+        # Verify output resolution matches target canvas
+        dims_raw = subprocess.check_output([
+            "ffprobe", "-v", "error", "-select_streams", "v:0",
+            "-show_entries", "stream=width,height", "-of", "csv=p=0", str(dst_path)
+        ], text=True).strip()
+        if dims_raw:
+            parts_wh = [int(v) for v in dims_raw.split(",")[:2] if v.strip().isdigit()]
+            if len(parts_wh) == 2 and (parts_wh[0], parts_wh[1]) != (exp_w, exp_h):
+                raise RuntimeError(f"Chunk {idx} rendered at {parts_wh[0]}x{parts_wh[1]}, expected {exp_w}x{exp_h}")
+
     async def _execute(self, job: dict, on_update):
         if job.get('status') == 'cancelled':
             raise JobCancelled()
         job_id = job["id"]
         src = job["input_video_path"]
         settings = job["settings"]
+        if settings.get("randomize_seed", False):
+            settings["seed"] = random.randint(0, 2**31 - 1)
+            job["settings"] = settings
+
         work_dir = DIRS["jobs"] / f"work_{job_id}"
         work_dir.mkdir(parents=True, exist_ok=True)
         job["work_dir"] = str(work_dir)
@@ -243,22 +351,31 @@ class Engine:
         job["stage"] = "Analyzing input video streams & cuts..."
         info = probe_video(src)
         job["video_info"] = info
-        dur = info["duration"]
+        src_dur = info["duration"]
+        dur = src_dur
         fps = info["fps"]
+        r_fps = info.get("r_frame_rate") or f"{fps}"
         total_frames = info["frames"]
 
         # Range clip selection if requested
+        r_s = 0.0
+        r_e = src_dur
+        has_range = False
         r_start = settings.get("range_start_s")
         r_end = settings.get("range_end_s")
         if r_start is not None or r_end is not None:
-            r_s = max(0.0, float(r_start or 0.0))
-            r_e = min(dur, float(r_end or dur))
-            if r_e > r_s + 0.5:
+            cand_s = max(0.0, float(r_start or 0.0))
+            cand_e = min(src_dur, float(r_end if (r_end is not None and float(r_end) > 0) else src_dur))
+            if cand_e > cand_s + 0.5:
+                r_s = cand_s
+                r_e = cand_e
                 dur = r_e - r_s
-                total_frames = round(dur * fps)
+                total_frames = max(1, round(dur * fps))
+                has_range = (r_s > 0.001 or r_e < src_dur - 0.001)
 
         # 3. Calculate target geometry
         mode = settings.get("mode", "refine")
+        two_pass_restore = (mode == "refine") and bool(settings.get("restore_first", False))
         res_mode = settings.get("resolution_mode", "scale")
         scale = float(settings.get("scale", 1.5))
         long_edge = int(settings.get("preset_long_edge", 1920))
@@ -271,25 +388,30 @@ class Engine:
         if is_test:
             test_f = int(settings.get("test_frames", 17))
             test_f = render_length_8n1(test_f)
-            t_s = float(settings.get("test_start_s", 0.0))
+            t_s = max(0.0, float(settings.get("test_start_s", r_s or 0.0)))
+            r_s = t_s
+            dur = test_f / fps
+            total_frames = test_f
             chunks = [{
-                "index": 0, "start_frame": round(t_s * fps), "end_frame": round(t_s * fps) + test_f,
-                "frames": test_f, "start_s": t_s, "end_s": t_s + (test_f / fps),
-                "duration_s": test_f / fps, "render_frames": test_f + (8 if mode != "pixel" else 0)
+                "index": 0, "start_frame": 0, "end_frame": test_f,
+                "frames": test_f, "start_s": 0.0, "end_s": dur,
+                "duration_s": dur, "render_frames": test_f + (8 if mode != "pixel" else 0)
             }]
             cuts = []
         else:
             job["stage"] = "Detecting scene cuts for smart chunking..."
             on_update(job)
-            cuts = detect_scene_cuts(src)
+            cuts_all = detect_scene_cuts(src)
+            cuts = [round(c - r_s, 3) for c in cuts_all if r_s + 0.1 < c < r_e - 0.1]
             job["scene_cuts"] = cuts
+            cuts_for_chunking = cuts if settings.get("snap_to_cuts", True) else []
 
             # Memory budget: if 0, auto-derive from RAM/VRAM
             budget = float(settings.get("budget_fmp", 0.0))
             if budget <= 0:
                 budget = 850.0 if mode == "pixel" else 500.0
             max_c_s = float(settings.get("max_chunk_s", 0.0))
-            chunks = smart_chunking(total_frames, fps, cuts, budget, tw, th, refine=(mode != "pixel"), max_chunk_s=max_c_s)
+            chunks = smart_chunking(total_frames, fps, cuts_for_chunking, budget, tw, th, refine=(mode != "pixel"), max_chunk_s=max_c_s)
 
         job["chunks"] = chunks
         job["total_chunks"] = len(chunks)
@@ -300,6 +422,7 @@ class Engine:
         # 4. Process each chunk
         rendered_parts = []
         save_opts = await self.comfy.save_options(crf=int(settings.get("crf", 14)))
+        num_passes = 2 if two_pass_restore else 1
 
         for idx, chunk in enumerate(chunks):
             if job.get("status") == "cancelled":
@@ -309,24 +432,28 @@ class Engine:
             c_input = work_dir / f"in_{c_tag}.mp4"
             c_frames = chunk["frames"]
             r_len = chunk["render_frames"]
-            s_time = chunk["start_s"]
+            s_time = r_s + chunk["start_s"]
 
-            job["stage"] = f"Rendering chunk {idx + 1}/{len(chunks)} ({c_frames} frames)..."
             job["current_chunk"] = idx + 1
-            on_update(job)
 
-            # Extract chunk video with ffmpeg
+            # Extract chunk video with frame-accurate post-input seek and BT.709 color tags
             vf = f"scale={cw}:{ch}:flags=lanczos" if geom["fit"] == "resize" else (f"crop={cw}:{ch}" if geom["fit"] == "crop" else "null")
-            pad = f",tpad=stop_mode=clone:stop_duration={r_len / fps:.3f}" if (idx == len(chunks) - 1 or s_time + (r_len / fps) > dur) else ""
-            cut_cmd = [
-                "ffmpeg", "-y", "-v", "error", "-ss", f"{max(0.0, s_time - 0.5/fps):.6f}",
-                "-i", src
-            ]
+            past_end = (round(s_time * fps) + r_len > round(src_dur * fps)) or (chunk["start_s"] + (r_len / fps) > dur)
+            pad = f",tpad=stop_mode=clone:stop_duration={r_len / fps:.3f}" if (idx == len(chunks) - 1 or past_end) else ""
+            seek_t = max(0.0, s_time - 0.5 / fps)
+            pre_seek = max(0.0, seek_t - 5.0) if seek_t > 15.0 else 0.0
+            post_seek = seek_t - pre_seek
+            cut_cmd = ["ffmpeg", "-y", "-v", "error"]
+            if pre_seek > 0:
+                cut_cmd += ["-ss", f"{pre_seek:.6f}"]
+            cut_cmd += ["-i", src]
             if not info["has_audio"]:
                 cut_cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
             cut_cmd += [
+                "-ss", f"{post_seek:.6f}",
                 "-frames:v", str(r_len), "-vf", vf + pad,
                 "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p",
+                "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                 "-c:a", "aac", "-b:a", "192k"
             ]
             if not info["has_audio"]:
@@ -334,123 +461,78 @@ class Engine:
             cut_cmd += [str(c_input)]
             subprocess.run(cut_cmd, check=True)
 
-            # Upload chunk to ComfyUI
-            up_name = await self.comfy.upload(str(c_input))
-
-            first_frame_name = None
-            if mode == "pixel":
-                frm_path = work_dir / f"f0_{c_tag}.png"
-                subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(c_input), "-frames:v", "1", "-update", "1", str(frm_path)], check=True)
-                first_frame_name = await self.comfy.upload(str(frm_path))
-
-            # Flush unused cached tensors before each chunk to prevent OOM
-            await self.release_temporary_memory()
-
-            # Build and submit workflow
-            prompt = build_workflow(settings, up_name, c_tag, tw, th, cw, ch, save_options=save_opts, first_frame_image_name=first_frame_name)
-            prompt_id = await self.comfy.submit(prompt, extra={"job_id": job_id, "chunk": idx})
-            job["prompt_id"] = prompt_id
-
-            # Monitor progress via WS
-            stop_ev = asyncio.Event()
-
-            def on_ws(evt_type, data):
-                if evt_type == "progress":
-                    val = data.get("value", 0)
-                    m = data.get("max", 8)
-                    job["step"] = val
-                    job["max_steps"] = m
-                    chunk_frac = (idx + (val / max(1, m))) / len(chunks)
-                    job["progress"] = round(5.0 + chunk_frac * 80.0, 1)
-                    elapsed = time.time() - t_start
-                    if chunk_frac > 0:
-                        total_est = elapsed / chunk_frac
-                        rem = max(0.0, total_est - elapsed)
-                        job["eta_text"] = fmt_eta(rem)
-                        job["eta_seconds"] = round(rem)
-                    on_update(job)
-                elif evt_type == "execution_error":
-                    job["error"] = data.get("exception_message")
-
-            ws_task = asyncio.create_task(self.comfy.watch(prompt_id, on_ws, stop_ev))
-
-            # Poll history until finished with detection for worker restart
-            history_item = None
-            not_found_ticks = 0
-            while True:
-                if job.get("status") == "cancelled":
-                    await self.comfy.interrupt()
-                    stop_ev.set()
-                    ws_task.cancel()
-                    raise JobCancelled()
-                try:
-                    h = await self.comfy.history(prompt_id)
-                    if prompt_id in h:
-                        st = h[prompt_id].get("status", {})
-                        if st.get("status_str") == "success":
-                            out = h[prompt_id].get("outputs", {}).get("4852", {})
-                            for k in ("video", "videos", "gifs", "images"):
-                                for itm in out.get(k) or []:
-                                    if itm.get("type", "output") == "output":
-                                        history_item = itm
-                                        break
-                            break
-                        else:
-                            msgs = st.get("messages", [])
-                            err_txt = "ComfyUI execution failed"
-                            for m in msgs:
-                                if len(m) > 1 and isinstance(m[1], dict):
-                                    if "exception_message" in m[1]:
-                                        err_txt = m[1]["exception_message"]
-                                    elif "node_errors" in m[1]:
-                                        err_txt = "Node error: " + str(m[1]["node_errors"])
-                            raise RuntimeError(err_txt)
-                    else:
-                        # Check whether prompt is still queued or active in ComfyUI
-                        try:
-                            q = await self.comfy.queue()
-                            running = any(item[1] == prompt_id for item in q.get("queue_running", []))
-                            pending = any(item[1] == prompt_id for item in q.get("queue_pending", []))
-                            if not running and not pending:
-                                not_found_ticks += 1
-                                if not_found_ticks >= 6:
-                                    raise RuntimeError("ComfyUI worker restarted or prompt lost from queue")
-                            else:
-                                not_found_ticks = 0
-                        except Exception as q_err:
-                            if "restarted" in str(q_err):
-                                raise
-                except (PromptRejected, RuntimeError):
-                    raise
-                except Exception:
-                    pass
-                await asyncio.sleep(2)
-
-            stop_ev.set()
-            ws_task.cancel()
-
-            # Flush memory immediately after chunk completion
-            await self.release_temporary_memory()
-
-            if not history_item:
-                raise RuntimeError(f"Chunk {idx} produced no output file")
-
-            # Download chunk output
             dst_chunk = work_dir / f"out_{c_tag}.mp4"
-            await self.comfy.download(history_item, str(dst_chunk))
 
-            # Trim extra 8 frames if refine padding was applied
+            if two_pass_restore:
+                # Pass 1: Restore IC-LoRA at 1.0x source resolution (on /32 grid) to clean artifacts first
+                rw, rh, _, _ = solve_dims(cw, ch, 1.0, 32)
+                job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 1/2: Restore ({c_frames} frames @ {rw}x{rh})..."
+                on_update(job)
+
+                up_p1 = await self.comfy.upload(str(c_input))
+                p1_settings = {**settings, "mode": "restore", "restore_first": False}
+                p1_prompt = build_workflow(p1_settings, up_p1, f"{c_tag}_p1", rw, rh, cw, ch, save_options=save_opts)
+                p1_raw = work_dir / f"p1_raw_{c_tag}.mp4"
+                await self._run_comfy_prompt(
+                    job, p1_prompt, {"job_id": job_id, "chunk": idx, "pass": 1},
+                    p1_raw, rw, rh, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=2
+                )
+
+                # Re-mux Pass 1 restored video with original chunk audio and BT.709 tags as input for Pass 2
+                p2_in = work_dir / f"in_p2_{c_tag}.mp4"
+                subprocess.run([
+                    "ffmpeg", "-y", "-v", "error", "-i", str(p1_raw), "-i", str(c_input),
+                    "-map", "0:v:0", "-map", "1:a:0", "-frames:v", str(r_len),
+                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p",
+                    "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-c:a", "copy", "-shortest", str(p2_in)
+                ], check=True)
+
+                # Pass 2: Refine Details IC-LoRA at final target resolution (tw x th)
+                job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 2/2: Refine Details ({c_frames} frames @ {tw}x{th})..."
+                on_update(job)
+
+                up_p2 = await self.comfy.upload(str(p2_in))
+                p2_settings = {**settings, "mode": "refine", "restore_first": False}
+                p2_prompt = build_workflow(p2_settings, up_p2, c_tag, tw, th, rw, rh, save_options=save_opts)
+                await self._run_comfy_prompt(
+                    job, p2_prompt, {"job_id": job_id, "chunk": idx, "pass": 2},
+                    dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=1, num_passes=2
+                )
+            else:
+                job["stage"] = f"Rendering chunk {idx + 1}/{len(chunks)} ({c_frames} frames @ {tw}x{th})..."
+                on_update(job)
+
+                up_name = await self.comfy.upload(str(c_input))
+                first_frame_name = None
+                if mode == "pixel":
+                    frm_path = work_dir / f"f0_{c_tag}.png"
+                    subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(c_input), "-frames:v", "1", "-update", "1", str(frm_path)], check=True)
+                    first_frame_name = await self.comfy.upload(str(frm_path))
+
+                prompt = build_workflow(settings, up_name, c_tag, tw, th, cw, ch, save_options=save_opts, first_frame_image_name=first_frame_name)
+                await self._run_comfy_prompt(
+                    job, prompt, {"job_id": job_id, "chunk": idx},
+                    dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=1
+                )
+
+            # Verify output frame count and trim extra 8 frames if refine padding was applied
             actual_f = int(subprocess.check_output([
                 "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
                 "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(dst_chunk)
             ], text=True).strip() or "0")
+
+            if actual_f < c_frames:
+                raise RuntimeError(f"Chunk {idx} returned {actual_f} frames, expected at least {c_frames}")
 
             if actual_f > c_frames:
                 trimmed_chunk = work_dir / f"t_{c_tag}.mp4"
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error", "-i", str(dst_chunk),
                     "-frames:v", str(c_frames), "-c:v", "libx264", "-crf", "14",
-                    "-pix_fmt", "yuv420p", "-c:a", "copy", str(trimmed_chunk)
+                    "-pix_fmt", "yuv420p",
+                    "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                    "-c:a", "copy", str(trimmed_chunk)
                 ], check=True)
                 os.replace(trimmed_chunk, dst_chunk)
 
@@ -461,26 +543,41 @@ class Engine:
         job["progress"] = 87.0
         on_update(job)
 
+        audio_mode = settings.get("audio_mode", "original")
+        keep_gen_audio = (audio_mode == "generated")
+
         retimed_parts = []
         for p in rendered_parts:
             rt = work_dir / f"rt_{os.path.basename(p)}"
-            subprocess.run([
+            rt_cmd = [
                 "ffmpeg", "-y", "-v", "error", "-i", p,
-                "-vf", f"setpts=N/(({fps})*TB)", "-fps_mode", "passthrough",
-                "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p", "-an",
-                str(rt)
-            ], check=True)
+                "-vf", f"setpts=N/(({r_fps})*TB)", "-fps_mode", "passthrough",
+                "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p",
+                "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+            ]
+            if keep_gen_audio:
+                rt_cmd += ["-c:a", "aac", "-b:a", "192k"]
+            else:
+                rt_cmd += ["-an"]
+            rt_cmd += [str(rt)]
+            subprocess.run(rt_cmd, check=True)
             retimed_parts.append(str(rt))
 
         concat_list = work_dir / "concat.txt"
-        concat_list.write_text("".join(f"file '{p}'\n" for p in retimed_parts))
+        concat_list.write_text("".join("file '%s'\n" % os.path.abspath(p).replace("'", "'\\''") for p in retimed_parts))
         joined_raw = work_dir / "joined_raw.mp4"
-        subprocess.run([
+        concat_cmd = [
             "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
             "-i", str(concat_list), "-c:v", "libx264", "-crf", "15",
-            "-fps_mode", "passthrough", "-pix_fmt", "yuv420p", "-an",
-            str(joined_raw)
-        ], check=True)
+            "-fps_mode", "passthrough", "-pix_fmt", "yuv420p",
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+        ]
+        if keep_gen_audio:
+            concat_cmd += ["-c:a", "aac", "-b:a", "192k"]
+        else:
+            concat_cmd += ["-an"]
+        concat_cmd += [str(joined_raw)]
+        subprocess.run(concat_cmd, check=True)
 
         # 6. Color Consistency pass if enabled
         assembled_video = joined_raw
@@ -490,40 +587,51 @@ class Engine:
             job["progress"] = 90.0
             on_update(job)
 
-            # Sample low-res stats for both source and assembled
+            # Sample low-res stats for both source (matching exact time window & frame count) and assembled output
             w_stat, h_stat = 320, int(round(320 * (th / tw)))
-            src_cmd = colorfix.lowres_cmd(["-i", src], f"scale={tw}:{th}:flags=lanczos", w_stat, h_stat)
+            src_in_args = []
+            if r_s > 0.001:
+                src_in_args += ["-ss", f"{r_s:.6f}"]
+            src_in_args += ["-i", src, "-frames:v", str(total_frames)]
+            src_cmd = colorfix.lowres_cmd(src_in_args, f"scale={tw}:{th}:flags=lanczos", w_stat, h_stat)
             out_cmd = colorfix.lowres_cmd(["-i", str(joined_raw)], "", w_stat, h_stat)
 
             bounds_frames = [c["start_frame"] for c in chunks[1:]]
+            cuts_frames = [round(c * fps) for c in cuts]
             src_stats = colorfix.collect_stats(src_cmd, w_stat, h_stat)
             out_stats = colorfix.collect_stats(out_cmd, w_stat, h_stat)
 
-            color_report = colorfix.analyze(src_stats, out_stats, fps, cuts, bounds_frames)
+            color_report = colorfix.analyze(src_stats, out_stats, fps, cuts_frames, bounds_frames)
             job["color_analysis"] = color_report
 
             should_apply = True
-            if settings.get("color_auto", True) and color_report["verdict"] == "ok":
+            if settings.get("color_auto", False) and color_report["verdict"] == "ok":
                 should_apply = False
 
             if should_apply:
                 job["stage"] = "Applying color matching & flicker correction (face protected)..."
                 on_update(job)
                 plan_ = colorfix.plan(
-                    src_stats, out_stats, cuts, bounds_frames,
+                    src_stats, out_stats, cuts_frames, bounds_frames,
                     mode=settings.get("color_mode", "source"),
-                    strength=float(settings.get("color_strength", 0.7)),
+                    strength=float(settings.get("color_strength", 0.85)),
                     window=int(settings.get("color_window", 9)),
                     max_shift=float(settings.get("color_max_shift", 6.0)),
-                    match_std=bool(settings.get("color_match_std", False))
+                    match_std=bool(settings.get("color_match_std", True))
                 )
                 corrected_video = work_dir / "color_corrected.mp4"
-                dec_c = ["ffmpeg", "-v", "error", "-i", str(joined_raw), "-an", "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
+                dec_c = [
+                    "ffmpeg", "-v", "error", "-i", str(joined_raw), "-an",
+                    "-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709:in_range=tv:out_range=full,format=rgb24",
+                    "-f", "rawvideo", "-pix_fmt", "rgb24", "-"
+                ]
                 enc_c = [
                     "ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
-                    "-s", f"{tw}x{th}", "-r", str(fps), "-i", "-",
+                    "-s", f"{tw}x{th}", "-r", str(r_fps), "-i", "-",
+                    "-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709:in_range=full:out_range=tv",
                     "-c:v", settings.get("vcodec", "libx264"), "-crf", str(settings.get("crf", 14)),
                     "-preset", settings.get("x_preset", "medium"), "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
+                    "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                     str(corrected_video)
                 ]
                 colorfix.apply(
@@ -542,12 +650,18 @@ class Engine:
         final_name = f"enhanced_{job_id}_{Path(src).stem}.{ext}"
         final_path = DIRS["outputs"] / final_name
 
-        audio_mode = settings.get("audio_mode", "original")
         has_orig_audio = info["has_audio"] and (audio_mode == "original")
 
         export_cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(assembled_video)]
         if has_orig_audio:
+            if is_test or has_range:
+                export_cmd += ["-ss", f"{r_s:.6f}", "-t", f"{dur:.6f}"]
             export_cmd += ["-i", src, "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k", "-af", "apad", "-shortest"]
+        elif keep_gen_audio:
+            if assembled_video != joined_raw:
+                export_cmd += ["-i", str(joined_raw), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k", "-shortest"]
+            else:
+                export_cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k"]
         else:
             export_cmd += ["-map", "0:v:0", "-an"]
 
@@ -555,7 +669,8 @@ class Engine:
             "-c:v", settings.get("vcodec", "libx264"),
             "-crf", str(settings.get("crf", 14)),
             "-preset", settings.get("x_preset", "slow"),
-            "-pix_fmt", settings.get("pix_fmt", "yuv420p")
+            "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
+            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
         ]
         if settings.get("faststart", True):
             export_cmd += ["-movflags", "+faststart"]
@@ -566,11 +681,12 @@ class Engine:
         # 8. Generate Before/After Comparison Preview
         job["stage"] = "Generating before/after comparisons..."
         preview_img = work_dir / "preview_split.jpg"
+        prev_off = min(0.5, max(0.0, dur * 0.2))
         subprocess.run([
             "ffmpeg", "-y", "-v", "error",
-            "-ss", "0.5", "-i", src,
-            "-ss", "0.5", "-i", str(final_path),
-            "-filter_complex", f"[0:v]scale={tw}:{th}:flags=lanczos[v0];[v0][1:v]hstack[v]",
+            "-ss", f"{r_s + prev_off:.3f}", "-i", src,
+            "-ss", f"{prev_off:.3f}", "-i", str(final_path),
+            "-filter_complex", f"[0:v]scale={tw}:{th}:flags=lanczos:in_color_matrix=bt709:out_color_matrix=bt709[v0];[v0][1:v]hstack[v]",
             "-map", "[v]", "-frames:v", "1", "-q:v", "3", str(preview_img)
         ], check=False)
 

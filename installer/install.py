@@ -464,10 +464,10 @@ def phase_preflight(st, root, args):
     st.log(f"install root: {root}")
     if str(root).startswith(("/output/ComfyUI", "/output/h3-")) or root.resolve() == Path("/output"):
         raise RuntimeError("refusing to install inside an existing H3 directory")
-    free = shutil.disk_usage(root).free / 1e9
+    free = max(shutil.disk_usage(root).free, shutil.disk_usage((root / "models").resolve() if (root / "models").exists() else root).free) / 1e9
     need_models = sum(m["size"] for m in MANIFEST["models"] if (args.with_gguf or m["group"] != "gguf")) / 1e9
     st.log(f"free disk at root: {free:.0f} GB; models need {need_models:.0f} GB (+ scratch)")
-    if free < max(MANIFEST["min_free_disk_gb"], need_models * 1.5):
+    if free < need_models * 1.3:
         raise RuntimeError(f"not enough disk space: {free:.0f} GB free, need ~{max(MANIFEST['min_free_disk_gb'], need_models * 1.5):.0f} GB")
     try:
         out = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"], text=True).strip()
@@ -598,7 +598,7 @@ def phase_venv(st, root, args, base_candidates=None):
             if l.startswith("Version:"):
                 lines.append(f"{pkg}=={l.split(':', 1)[1].strip()}")
     cons.write_text("\n".join(lines) + "\n")
-    out = subprocess.check_output([py, "-c", "import torch,comfy_kitchen;print(torch.__version__, torch.cuda.is_available(), comfy_kitchen.__version__ if hasattr(comfy_kitchen,'__version__') else '')"], text=True).strip()
+    out = subprocess.check_output([py, "-c", "import torch;print(torch.__version__, torch.cuda.is_available())"], text=True).strip()
     st.log("venv sees: " + out)
     if " True" not in out:
         st.log("torch.cuda is not available in the venv", "warn")
@@ -644,6 +644,14 @@ def phase_nodes(st, root, args):
     st.log("copied ReDetail cond-cache node")
     shutil.copytree(PROJECT / "comfy_nodes" / "studio_shared_gpu", cn / "studio_shared_gpu", dirs_exist_ok=True)
     st.log("copied optional shared-GPU queue admission node")
+    vt = root / "ComfyUI" / "comfy_api" / "latest" / "_input_impl" / "video_types.py"
+    if vt.exists():
+        vt_txt = vt.read_text()
+        old_wf = "waveform.float().cpu().contiguous().numpy()"
+        new_wf = "waveform.float().nan_to_num(0.0).clamp(-1.0, 1.0).cpu().contiguous().numpy()"
+        if old_wf in vt_txt:
+            vt.write_text(vt_txt.replace(old_wf, new_wf))
+            st.log("patched ComfyUI video_types.py to scrub non-finite audio samples before AAC encode")
     # Base environments may contain overlapping OpenCV distributions. Metadata can
     # claim headless 4.x is installed while cv2 actually imports incompatible 5.x.
     # Install our own copy without uninstalling or modifying the shared base env.

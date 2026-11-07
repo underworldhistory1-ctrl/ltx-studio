@@ -1,97 +1,242 @@
 {
   "schema": 1,
   "version": "1.0.0",
-  "ports": {"studio": 7860, "comfy": 8189},
+  "ports": {
+    "studio": 7860,
+    "comfy": 8189
+  },
   "repos": {
     "comfyui": {
       "url": "https://github.com/comfyanonymous/ComfyUI.git",
       "commit": "b65d1ffaca35fcda5889e120dcd0c8520553c7b2",
       "fallback_commit": "3b4c0b0e457cf0a51cf3038e0a6750d8f96ce251"
     },
-    "ltxvideo": {"url": "https://github.com/Lightricks/ComfyUI-LTXVideo.git", "branch": "master"},
-    "gguf": {"url": "https://github.com/city96/ComfyUI-GGUF.git", "branch": "main"},
-    "redetail": {"url": "https://github.com/Bambushu/redetail.git", "commit": "a2b807ef3e57cdbe2962eeaf8842a6107fcc93ad"}
+    "ltxvideo": {
+      "url": "https://github.com/Lightricks/ComfyUI-LTXVideo.git",
+      "branch": "master"
+    },
+    "gguf": {
+      "url": "https://github.com/city96/ComfyUI-GGUF.git",
+      "branch": "main"
+    },
+    "redetail": {
+      "url": "https://github.com/Bambushu/redetail.git",
+      "commit": "a2b807ef3e57cdbe2962eeaf8842a6107fcc93ad"
+    }
   },
   "min_free_disk_gb": 120,
   "models": [
     {
-      "id": "dit_int8", "group": "core", "required": true,
+      "id": "dit_int8",
+      "group": "core",
+      "required": true,
       "label": "LTX-2.5 22B Distilled transformer (INT8 ConvRot)",
-      "dir": "diffusion_models", "name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
-      "size": 21504034224, "kind": "safetensors",
+      "dir": "diffusion_models",
+      "name": "ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+      "size": 21504034224,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5", "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5", "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors", "gated": true}
+        {
+          "type": "hf",
+          "repo": "comfyicu/LTX-2.5",
+          "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+          "gated": false
+        },
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "diffusion_models/ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "te_int8", "group": "core", "required": true,
+      "id": "te_int8",
+      "group": "core",
+      "required": true,
       "label": "Gemma-4 12B text encoder (INT8 ConvRot)",
-      "dir": "text_encoders", "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
-      "size": 15372969374, "kind": "safetensors",
+      "dir": "text_encoders",
+      "name": "gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+      "size": 15372969374,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5", "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5", "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors", "gated": true}
+        {
+          "type": "hf",
+          "repo": "comfyicu/LTX-2.5",
+          "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+          "gated": false
+        },
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "text_encoders/gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "vae_video", "group": "core", "required": true,
+      "id": "vae_video",
+      "group": "core",
+      "required": true,
       "label": "LTX-2.5 video VAE (bf16)",
-      "dir": "vae", "name": "ltx-2.5-video-vae-bf16.safetensors",
-      "size": 1472223346, "kind": "safetensors",
+      "dir": "vae",
+      "name": "ltx-2.5-video-vae-bf16.safetensors",
+      "size": 1472223346,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5", "path": "vae/ltx-2.5-video-vae-bf16.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5", "path": "vae/ltx-2.5-video-vae-bf16.safetensors", "gated": true}
+        {
+          "type": "hf",
+          "repo": "comfyicu/LTX-2.5",
+          "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+          "gated": false
+        },
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "vae/ltx-2.5-video-vae-bf16.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "vae/ltx-2.5-video-vae-bf16.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "vae_audio", "group": "core", "required": true,
+      "id": "vae_audio",
+      "group": "core",
+      "required": true,
       "label": "LTX-2.5 audio VAE (bf16)",
-      "dir": "vae", "name": "ltx-2.5-audio-vae-bf16.safetensors",
-      "size": 364866540, "kind": "safetensors",
+      "dir": "vae",
+      "name": "ltx-2.5-audio-vae-bf16.safetensors",
+      "size": 364866540,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5", "path": "vae/ltx-2.5-audio-vae-bf16.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5", "path": "vae/ltx-2.5-audio-vae-bf16.safetensors", "gated": true}
+        {
+          "type": "hf",
+          "repo": "comfyicu/LTX-2.5",
+          "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+          "gated": false
+        },
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "vae/ltx-2.5-audio-vae-bf16.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5",
+          "path": "vae/ltx-2.5-audio-vae-bf16.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "lora_refine", "group": "core", "required": true,
+      "id": "lora_refine",
+      "group": "core",
+      "required": true,
       "label": "IC-LoRA Refine-Details 1.0",
-      "dir": "loras", "name": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors",
-      "size": 1308787534, "kind": "safetensors",
+      "dir": "loras",
+      "name": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors",
+      "size": 1308787534,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details", "path": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details", "path": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors", "gated": true}
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details",
+          "path": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Refine-Details",
+          "path": "ltx-2.5-22b-ic-lora-refine-details-1.0.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "lora_pixel", "group": "core", "required": true,
+      "id": "lora_pixel",
+      "group": "core",
+      "required": true,
       "label": "IC-LoRA Pixel Spatial Upscaler x2 1.0",
-      "dir": "loras", "name": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors",
-      "size": 327322640, "kind": "safetensors",
+      "dir": "loras",
+      "name": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors",
+      "size": 327322640,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler", "path": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler", "path": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors", "gated": true}
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler",
+          "path": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Pixel-Spatial-Upscaler",
+          "path": "ltx-2.5-22b-ic-lora-pixel-spatial-upscaler-x2-1.0.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "lora_restore", "group": "core", "required": false,
+      "id": "lora_restore",
+      "group": "core",
+      "required": false,
       "label": "IC-LoRA Restore 1.0 (kept from the original Studio)",
-      "dir": "loras", "name": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors",
-      "size": 1711643914, "kind": "safetensors",
+      "dir": "loras",
+      "name": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors",
+      "size": 1711643914,
+      "kind": "safetensors",
       "sources": [
-        {"type": "modelscope", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Restore", "path": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors"},
-        {"type": "hf", "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Restore", "path": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors", "gated": true}
+        {
+          "type": "hf",
+          "repo": "sebfil/LTX-2.5-22b-IC-LoRA-Restore-mirror",
+          "path": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors",
+          "gated": false
+        },
+        {
+          "type": "modelscope",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Restore",
+          "path": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors"
+        },
+        {
+          "type": "hf",
+          "repo": "Lightricks/LTX-2.5-22b-IC-LoRA-Restore",
+          "path": "ltx-2.5-22b-ic-lora-restore-1.0.safetensors",
+          "gated": true
+        }
       ]
     },
     {
-      "id": "gguf_q4km", "group": "gguf", "required": false,
+      "id": "gguf_q4km",
+      "group": "gguf",
+      "required": false,
       "label": "LTX-2.5 Distilled GGUF Q4_K_M (low-VRAM path)",
-      "dir": "unet", "name": "LTX-2.5-Distilled-Q4_K_M.gguf",
-      "size": 15687639488, "kind": "gguf",
+      "dir": "unet",
+      "name": "LTX-2.5-Distilled-Q4_K_M.gguf",
+      "size": 15687639488,
+      "kind": "gguf",
       "sources": [
-        {"type": "hfmirror", "repo": "Abiray/LTX-2.5-Distilled-GGUF", "path": "LTX-2.5-Distilled-Q4_K_M.gguf"},
-        {"type": "hf", "repo": "Abiray/LTX-2.5-Distilled-GGUF", "path": "LTX-2.5-Distilled-Q4_K_M.gguf"}
+        {
+          "type": "hfmirror",
+          "repo": "Abiray/LTX-2.5-Distilled-GGUF",
+          "path": "LTX-2.5-Distilled-Q4_K_M.gguf"
+        },
+        {
+          "type": "hf",
+          "repo": "Abiray/LTX-2.5-Distilled-GGUF",
+          "path": "LTX-2.5-Distilled-Q4_K_M.gguf"
+        }
       ]
     }
   ]

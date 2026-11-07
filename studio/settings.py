@@ -25,14 +25,14 @@ DEFAULTS = {
     "tile_mode": "auto", "tile_w": 1024, "tile_h": 576, "overlap_frac": 0.0, "blend_var": 0.05,
     "grid_cycle": 1, "tile_frames": 0, "canvas_device": "auto",
     "video_vae": "ltx-2.5-video-vae-bf16.safetensors", "audio_vae": "ltx-2.5-audio-vae-bf16.safetensors",
-    "decode_tile": 0, "decode_temporal": 0,
+    "decode_tile": 1024, "decode_temporal": 0,
     "budget_fmp": 0, "max_chunk_s": 0, "snap_to_cuts": True,
     "audio_mode": "original", "audio_bitrate_k": 256,
     "container": "mp4", "vcodec": "libx264", "crf": 14, "x_preset": "slow", "pix_fmt": "yuv420p", "faststart": True,
     "keep_chunks": False,
-    "color_enabled": False, "color_mode": "source", "color_strength": 0.7, "color_window": 9,
-    "color_max_shift": 6.0, "color_match_std": False, "protect_faces": True, "protect_skin": 0.6,
-    "color_auto": True,
+    "color_enabled": True, "color_mode": "source", "color_strength": 0.85, "color_window": 9,
+    "color_max_shift": 6.0, "color_match_std": True, "protect_faces": True, "protect_skin": 0.6,
+    "color_auto": False,
     "range_start_s": None, "range_end_s": None,
     "test_enabled": False, "test_start_s": 0.0, "test_frames": 17,
 }
@@ -106,8 +106,8 @@ SCHEMA = [
     {"group": "vae", "title": "VAE & Decode", "advanced": True, "fields": [
         {"key": "video_vae", "label": "Video VAE", "type": "select", "options_from": "vaes"},
         {"key": "audio_vae", "label": "Audio VAE", "type": "select", "options_from": "vaes"},
-        {"key": "decode_tile", "label": "Decode tile size (0 = default 512)", "type": "number", "min": 0, "max": 1024, "step": 32,
-         "help": "Lower this if the render OOMs after the progress bar completes (256 works on 24 GB)."},
+        {"key": "decode_tile", "label": "Decode tile size (0 or 1024 = full 1024)", "type": "number", "min": 0, "max": 1024, "step": 32,
+         "help": "1024 prevents spatial VAE tile seams. Lower to 256 if decoding OOMs on 24 GB cards."},
         {"key": "decode_temporal", "label": "Decode temporal size (0 = default 128)", "type": "number", "min": 0, "max": 256, "step": 8},
     ]},
     {"group": "memory", "title": "Memory Budget & Chunking", "advanced": True, "fields": [
@@ -146,12 +146,12 @@ SCHEMA = [
 ]
 
 BUILTIN_PRESETS = {
-    "identity_safe": {"label": "Faces & identity safe (recommended)", "settings": {"mode": "refine", "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_mode": "source", "color_strength": 0.6, "protect_faces": True}},
-    "detail_4k": {"label": "4K detail, single pass", "settings": {"mode": "refine", "resolution_mode": "preset", "preset_long_edge": 3840, "guide_strength": 1.0, "cached_cond": True, "color_enabled": True, "color_auto": True}},
-    "max_texture": {"label": "Max texture (Pixel, fast)", "settings": {"mode": "pixel", "scale": 2.0, "color_enabled": True, "color_mode": "source", "color_strength": 0.5}},
-    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_mode": "temporal", "color_strength": 0.8}},
-    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250}},
-    "in_place": {"label": "Re-detail in place (1.0x)", "settings": {"mode": "refine", "scale": 1.0, "guide_strength": 1.0}},
+    "identity_safe": {"label": "Faces & identity safe (recommended)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "protect_faces": True, "decode_tile": 1024}},
+    "detail_4k": {"label": "4K detail, single pass", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 3840, "guide_strength": 1.0, "cached_cond": True, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
+    "max_texture": {"label": "Max texture (Pixel, fast)", "settings": {"mode": "pixel", "restore_first": False, "resolution_mode": "scale", "scale": 2.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
+    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "temporal", "color_strength": 0.85, "decode_tile": 1024}},
+    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "restore_first": False, "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85}},
+    "in_place": {"label": "Re-detail in place (1.0x)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.0, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
 }
 
 

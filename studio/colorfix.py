@@ -49,7 +49,8 @@ def iter_frames(cmd, w, h):
 
 
 def lowres_cmd(input_args, vf, w, h, extra_in=None):
-    return ["ffmpeg", "-v", "error", *input_args, "-an", "-vf", f"{vf + ',' if vf else ''}scale={w}:{h}:flags=area,format=rgb24",
+    return ["ffmpeg", "-v", "error", *input_args, "-an",
+            "-vf", f"{vf + ',' if vf else ''}scale={w}:{h}:flags=area:in_color_matrix=bt709:out_color_matrix=bt709:in_range=tv:out_range=full,format=rgb24",
             "-f", "rawvideo", "-pix_fmt", "rgb24", "-"]
 
 
@@ -121,14 +122,28 @@ def analyze(src_stats, out_stats, fps, cuts=(), bounds=(), max_points=300):
              "max_abs_L": float(np.abs(d[:, 0]).max()), "max_chroma": float(np.sqrt(d[:, 1] ** 2 + d[:, 2] ** 2).max()),
              "mean_chroma": float(np.sqrt(d[:, 1] ** 2 + d[:, 2] ** 2).mean())}
     sj_L = seam_jumps(o[:, 0], bounds, cuts)
-    sj_src = {j["frame"]: j for j in seam_jumps(s[:, 0], bounds, cuts)}
+    sj_a = {j["frame"]: j for j in seam_jumps(o[:, 1], bounds, cuts)}
+    sj_b = {j["frame"]: j for j in seam_jumps(o[:, 2], bounds, cuts)}
+    sj_src_L = {j["frame"]: j for j in seam_jumps(s[:, 0], bounds, cuts)}
+    sj_src_a = {j["frame"]: j for j in seam_jumps(s[:, 1], bounds, cuts)}
+    sj_src_b = {j["frame"]: j for j in seam_jumps(s[:, 2], bounds, cuts)}
     seams = []
     for j in sj_L:
-        src_jump = sj_src.get(j["frame"], {}).get("jump", 0.0)
-        excess = abs(j["jump"]) - abs(src_jump)
-        seams.append({**j, "src_jump": src_jump, "excess": excess, "flag": bool(excess > max(1.2, 3 * j["jitter"]))})
+        fr = j["frame"]
+        src_jump_L = sj_src_L.get(fr, {}).get("jump", 0.0)
+        excess_L = abs(j["jump"]) - abs(src_jump_L)
+        ja = sj_a.get(fr, {"jump": 0.0, "jitter": 0.0})
+        jb = sj_b.get(fr, {"jump": 0.0, "jitter": 0.0})
+        excess_a = abs(ja["jump"]) - abs(sj_src_a.get(fr, {}).get("jump", 0.0))
+        excess_b = abs(jb["jump"]) - abs(sj_src_b.get(fr, {}).get("jump", 0.0))
+        excess_c = math.hypot(max(0.0, excess_a), max(0.0, excess_b))
+        jitter_c = math.hypot(ja["jitter"], jb["jitter"])
+        excess = max(excess_L, excess_c)
+        flag_L = excess_L > max(1.0, 2.5 * j["jitter"])
+        flag_c = excess_c > max(0.8, 2.5 * jitter_c)
+        seams.append({**j, "src_jump": src_jump_L, "excess": float(excess), "excess_chroma": float(excess_c), "flag": bool(flag_L or flag_c)})
     strong = (ratio_L > 1.8 and f_out_L > 0.35) or (ratio_c > 2.2 and f_out_c > 0.25) or any(x["flag"] and x["excess"] > 3 for x in seams)
-    mild = (ratio_L > 1.3 and f_out_L > 0.15) or (ratio_c > 1.5 and f_out_c > 0.1) or any(x["flag"] for x in seams) or drift["mean_chroma"] > 3.5
+    mild = (ratio_L > 1.3 and f_out_L > 0.15) or (ratio_c > 1.5 and f_out_c > 0.1) or any(x["flag"] for x in seams) or drift["mean_chroma"] > 1.5 or drift["mean_abs_L"] > 1.5
     verdict = "strong" if strong else ("mild" if mild else "ok")
     step = max(1, n // max_points)
     idx = np.arange(0, n, step)
@@ -168,6 +183,23 @@ def plan(src_stats, out_stats, cuts, bounds, mode="source", strength=0.7, window
     gain = np.ones((n, 3))
     if mode == "source":
         off = np.clip(s[:, :3] - o[:, :3], -max_shift, max_shift) * strength
+        # Also blend out any remaining seam step across chunk boundaries
+        o_corr = o[:, :3] + off
+        for b in bounds:
+            if b < 3 or b > n - 3 or any(abs(b - c) <= 1 for c in cuts):
+                continue
+            for c in range(3):
+                jo = o_corr[b:b + 3, c].mean() - o_corr[b - 3:b, c].mean()
+                js = s[b:b + 3, c].mean() - s[b - 3:b, c].mean()
+                step = float(np.clip(jo - js, -max_shift, max_shift))
+                w = max(2, window)
+                for i in range(1, w + 1):
+                    t_prev = b - i
+                    if t_prev >= 0:
+                        off[t_prev, c] += step / 2 * (1 - (i - 1) / w)
+                    t_next = b + i - 1
+                    if t_next < n:
+                        off[t_next, c] -= step / 2 * (1 - (i - 1) / w)
     elif mode == "temporal":
         for a, b in segments_from_cuts(n, cuts):
             if b - a < 3:
