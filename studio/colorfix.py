@@ -240,8 +240,17 @@ _FACE = None
 def _face_cascade():
     global _FACE
     if _FACE is None:
-        _FACE = cv2.CascadeClassifier(os.path.join(cv2.data.haarcascades, "haarcascade_frontalface_default.xml"))
-    return _FACE
+        cls = getattr(cv2, "CascadeClassifier", None)
+        data = getattr(cv2, "data", None)
+        if cls is not None and data is not None and hasattr(data, "haarcascades"):
+            try:
+                c = cls(os.path.join(data.haarcascades, "haarcascade_frontalface_default.xml"))
+                _FACE = c if not c.empty() else False
+            except Exception:
+                _FACE = False
+        else:
+            _FACE = False
+    return _FACE or None
 
 
 def protect_map(rgb, faces_hold, protect_faces, protect_skin, frame_idx, det_every=3):
@@ -251,15 +260,17 @@ def protect_map(rgb, faces_hold, protect_faces, protect_skin, frame_idx, det_eve
     sh = int(round(h * sw / w))
     small = cv2.resize(rgb, (sw, sh), interpolation=cv2.INTER_AREA)
     prot = np.zeros((sh, sw), np.float32)
-    if protect_skin > 0:
+    cascade = _face_cascade() if protect_faces else None
+    eff_skin = max(protect_skin, 0.75) if (protect_faces and cascade is None) else protect_skin
+    if eff_skin > 0:
         ycc = cv2.cvtColor(small, cv2.COLOR_RGB2YCrCb)
         skin = cv2.inRange(ycc, (0, 133, 77), (255, 173, 127)).astype(np.float32) / 255.0
         skin = cv2.GaussianBlur(skin, (0, 0), 3)
-        prot = np.maximum(prot, skin * protect_skin)
-    if protect_faces:
+        prot = np.maximum(prot, skin * eff_skin)
+    if cascade is not None:
         if frame_idx % det_every == 0 or "boxes" not in faces_hold:
             gray = cv2.cvtColor(small, cv2.COLOR_RGB2GRAY)
-            boxes = _face_cascade().detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(max(24, sw // 40), max(24, sw // 40)))
+            boxes = cascade.detectMultiScale(gray, scaleFactor=1.15, minNeighbors=4, minSize=(max(24, sw // 40), max(24, sw // 40)))
             faces_hold["boxes"] = [tuple(b) for b in boxes]
         fm = np.zeros((sh, sw), np.float32)
         for (x, y, bw, bh) in faces_hold["boxes"]:
