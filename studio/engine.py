@@ -6,7 +6,7 @@ from pathlib import Path
 import aiohttp
 import psutil
 
-from common import ROOT, DIRS, load_config, atomic_write_json, read_json, fmt_eta
+from common import ROOT, DIRS, load_config, atomic_write_json, read_json, fmt_eta, ram_limits
 from video import probe_video, detect_scene_cuts, target_resolution, solve_dims, smart_chunking, render_length_8n1
 from graph import build_workflow
 from comfy import ComfyClient, PromptRejected
@@ -406,12 +406,21 @@ class Engine:
             job["scene_cuts"] = cuts
             cuts_for_chunking = cuts if settings.get("snap_to_cuts", True) else []
 
-            # Memory budget: if 0, auto-derive from RAM/VRAM
+            # Memory budget: if 0, auto-derive from system RAM (for refine/restore) or VRAM (for pixel)
             budget = float(settings.get("budget_fmp", 0.0))
             if budget <= 0:
-                budget = 850.0 if mode == "pixel" else 500.0
+                if mode == "pixel":
+                    budget = 850.0
+                else:
+                    total_ram_gb, _ = ram_limits()
+                    budget = 500.0 if total_ram_gb >= 64 else max(240.0, min(360.0, (total_ram_gb - 22.0) * 16.0))
             max_c_s = float(settings.get("max_chunk_s", 0.0))
-            chunks = smart_chunking(total_frames, fps, cuts_for_chunking, budget, tw, th, refine=(mode != "pixel"), max_chunk_s=max_c_s)
+            # If resuming a job that already has completed chunk files on disk, keep its existing chunk layout
+            existing_chunks = job.get("chunks")
+            if existing_chunks and any((work_dir / f"out_ltx_{job_id}_c{i:03d}.mp4").exists() for i in range(len(existing_chunks))):
+                chunks = existing_chunks
+            else:
+                chunks = smart_chunking(total_frames, fps, cuts_for_chunking, budget, tw, th, refine=(mode != "pixel"), max_chunk_s=max_c_s)
 
         job["chunks"] = chunks
         job["total_chunks"] = len(chunks)

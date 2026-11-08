@@ -4,7 +4,7 @@ Cached Conditioning, Custom Sigmas, Tiled Fusion parameters, and VAE decode tuni
 import copy, json, os
 from pathlib import Path
 
-from common import REDETAIL
+from common import REDETAIL, ram_limits
 
 WF_REFINE_PATH = REDETAIL / "workflows" / "ltx25_refine_API.json"
 WF_PIXEL_PATH = REDETAIL / "workflows" / "ltx25_upscale_API.json"
@@ -175,16 +175,23 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
         cv_node["inputs"].setdefault("color_space", "sRGB")
         cv_node["inputs"].setdefault("codec", "none")
 
-    # 8. VAE Decode Tiled settings (default 0 -> 1024 with 128px overlap to prevent 512px tile seams)
+    # 8. VAE Decode Tiled settings
+    # Note: Diffusion sampling already uses 1024x576 tiles (LTXVTiledFusionSampler).
+    # VAEDecodeTiled is a separate memory spike after sampling completes; on <64 GB system RAM
+    # or >=2.5K canvases, capping tile_size=512 (with generous 128px overlap) and temporal_size=64
+    # prevents Linux cgroup OOM kills during VAE decode while keeping tile transitions seamless.
     dec_tile = int(settings.get("decode_tile", 0))
     dec_temp = int(settings.get("decode_temporal", 0))
     vaedec_node = pr.get("5518:5538")
     if vaedec_node and "inputs" in vaedec_node:
-        eff_tile = dec_tile if dec_tile > 0 else 1024
+        total_ram_gb, _ = ram_limits()
+        eff_tile = dec_tile if dec_tile > 0 else 512
+        if total_ram_gb < 64 and tw * th >= 2560 * 1440 and eff_tile > 512:
+            eff_tile = 512
         vaedec_node["inputs"]["tile_size"] = eff_tile
-        vaedec_node["inputs"]["overlap"] = max(32, min(128, (eff_tile // 8) // 32 * 32))
-        if dec_temp > 0:
-            vaedec_node["inputs"]["temporal_size"] = dec_temp
-            vaedec_node["inputs"]["temporal_overlap"] = min(vaedec_node["inputs"].get("temporal_overlap", 32), max(8, dec_temp // 4))
+        vaedec_node["inputs"]["overlap"] = 128 if eff_tile >= 512 else max(32, (eff_tile // 4) // 32 * 32)
+        eff_temp = dec_temp if dec_temp > 0 else (64 if total_ram_gb < 64 else 128)
+        vaedec_node["inputs"]["temporal_size"] = eff_temp
+        vaedec_node["inputs"]["temporal_overlap"] = min(32, max(16, (eff_temp // 4) // 8 * 8))
 
     return pr
