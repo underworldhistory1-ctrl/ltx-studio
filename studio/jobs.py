@@ -147,6 +147,20 @@ class JobManager:
         old = await self.get_job(job_id)
         if not old:
             raise KeyError("Job not found")
+        if old.get("status") in ("failed", "cancelled"):
+            h3_busy = await self._check_h3_busy()
+            async with self._lock:
+                if job_id not in self.queue and (not self.active_job or self.active_job.get("id") != job_id):
+                    is_busy = bool(self.active_job or self.queue or h3_busy)
+                    pos = len(self.queue) + (1 if self.active_job or h3_busy else 0)
+                    old["status"] = "queued"
+                    old["queue_position"] = pos if is_busy else 0
+                    old["stage"] = f"Waiting in queue (Position #{pos})..." if pos > 1 else ("Waiting in queue: GPU is busy with H3 render. Will start automatically..." if h3_busy else "Resuming from last completed chunk...")
+                    old["eta_text"] = "Queued"
+                    old["error"] = None
+                    self.queue.append(job_id)
+                    self._notify(old)
+            return old
         return await self.submit_job(old["input_video_path"], copy.deepcopy(old["settings"]), name=old.get("name"))
 
     async def _worker_loop(self):

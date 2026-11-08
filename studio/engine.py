@@ -435,6 +435,25 @@ class Engine:
             s_time = r_s + chunk["start_s"]
 
             job["current_chunk"] = idx + 1
+            dst_chunk = work_dir / f"out_{c_tag}.mp4"
+
+            # Resume check: if this chunk was already rendered and trimmed to exact c_frames & target resolution, reuse it
+            if dst_chunk.exists() and dst_chunk.stat().st_size > 1000:
+                try:
+                    existing_f = int(subprocess.check_output([
+                        "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                        "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(dst_chunk)
+                    ], text=True).strip() or "0")
+                    dims_chk = subprocess.check_output([
+                        "ffprobe", "-v", "error", "-select_streams", "v:0",
+                        "-show_entries", "stream=width,height", "-of", "csv=p=0", str(dst_chunk)
+                    ], text=True).strip()
+                    wh_chk = [int(v) for v in dims_chk.split(",")[:2] if v.strip().isdigit()]
+                    if existing_f == c_frames and wh_chk == [tw, th]:
+                        rendered_parts.append(str(dst_chunk))
+                        continue
+                except Exception:
+                    pass
 
             # Extract chunk video with frame-accurate post-input seek and BT.709 color tags
             vf = f"scale={cw}:{ch}:flags=lanczos" if geom["fit"] == "resize" else (f"crop={cw}:{ch}" if geom["fit"] == "crop" else "null")
@@ -456,36 +475,50 @@ class Engine:
                 "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                 "-c:a", "aac", "-b:a", "192k"
             ]
-            if not info["has_audio"]:
+            if info["has_audio"]:
+                cut_cmd += ["-af", "apad", "-shortest"]
+            else:
                 cut_cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
             cut_cmd += [str(c_input)]
             subprocess.run(cut_cmd, check=True)
 
-            dst_chunk = work_dir / f"out_{c_tag}.mp4"
-
             if two_pass_restore:
                 # Pass 1: Restore IC-LoRA at 1.0x source resolution (on /32 grid) to clean artifacts first
                 rw, rh, _, _ = solve_dims(cw, ch, 1.0, 32)
-                job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 1/2: Restore ({c_frames} frames @ {rw}x{rh})..."
-                on_update(job)
-
-                up_p1 = await self.comfy.upload(str(c_input))
-                p1_settings = {**settings, "mode": "restore", "restore_first": False}
-                p1_prompt = build_workflow(p1_settings, up_p1, f"{c_tag}_p1", rw, rh, cw, ch, save_options=save_opts)
                 p1_raw = work_dir / f"p1_raw_{c_tag}.mp4"
-                await self._run_comfy_prompt(
-                    job, p1_prompt, {"job_id": job_id, "chunk": idx, "pass": 1},
-                    p1_raw, rw, rh, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=2
-                )
+                p1_done = False
+                if p1_raw.exists() and p1_raw.stat().st_size > 1000:
+                    try:
+                        p1_f = int(subprocess.check_output([
+                            "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
+                            "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(p1_raw)
+                        ], text=True).strip() or "0")
+                        if p1_f >= r_len:
+                            p1_done = True
+                    except Exception:
+                        pass
 
-                # Re-mux Pass 1 restored video with original chunk audio and BT.709 tags as input for Pass 2
+                if not p1_done:
+                    job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 1/2: Restore ({c_frames} frames @ {rw}x{rh})..."
+                    on_update(job)
+
+                    up_p1 = await self.comfy.upload(str(c_input))
+                    p1_settings = {**settings, "mode": "restore", "restore_first": False}
+                    p1_prompt = build_workflow(p1_settings, up_p1, f"{c_tag}_p1", rw, rh, cw, ch, save_options=save_opts)
+                    await self._run_comfy_prompt(
+                        job, p1_prompt, {"job_id": job_id, "chunk": idx, "pass": 1},
+                        p1_raw, rw, rh, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=2
+                    )
+
+                # Re-mux Pass 1 restored video with padded chunk audio and BT.709 tags as input for Pass 2
+                # (-af apad before -shortest ensures shorter source audio never truncates the +8 padded video frames)
                 p2_in = work_dir / f"in_p2_{c_tag}.mp4"
                 subprocess.run([
                     "ffmpeg", "-y", "-v", "error", "-i", str(p1_raw), "-i", str(c_input),
                     "-map", "0:v:0", "-map", "1:a:0", "-frames:v", str(r_len),
                     "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p",
                     "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                    "-c:a", "copy", "-shortest", str(p2_in)
+                    "-c:a", "aac", "-b:a", "192k", "-af", "apad", "-shortest", str(p2_in)
                 ], check=True)
 
                 # Pass 2: Refine Details IC-LoRA at final target resolution (tw x th)
