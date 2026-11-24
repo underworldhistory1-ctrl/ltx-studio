@@ -429,6 +429,10 @@ function applyPreset(presetKey) {
     document.getElementById('cached-cond-chk').checked = s.cached_cond;
     document.getElementById('custom-encoder-sub').style.display = s.cached_cond ? 'none' : 'block';
   }
+  if (s.sparse_attention !== undefined) {
+    const sparseChk = document.getElementById('sparse-attn-chk');
+    if (sparseChk) sparseChk.checked = s.sparse_attention;
+  }
   if (s.decode_tile !== undefined) {
     document.getElementById('decode-tile-input').value = s.decode_tile;
   }
@@ -487,6 +491,7 @@ function collectSettings(isTest = false) {
     // Precision & Encoder
     precision: getVal('precision-select', 'int8') || 'int8',
     gguf_file: getVal('gguf-file-select', 'LTX-2.5-Distilled-Q4_K_M.gguf') || 'LTX-2.5-Distilled-Q4_K_M.gguf',
+    sparse_attention: getChecked('sparse-attn-chk', true),
     cached_cond: getChecked('cached-cond-chk', true),
     encoder: (getVal('encoder-select', '') || 'gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors'),
     clip_device: getVal('clip-dev-select', 'default') || 'default',

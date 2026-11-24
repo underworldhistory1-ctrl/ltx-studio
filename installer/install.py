@@ -195,7 +195,7 @@ def source_url(src, mirror_base=None):
     t = src["type"]
     if t == "modelscope":
         from urllib.parse import quote
-        return f"https://www.modelscope.cn/api/v1/models/{src['repo']}/repo?Revision=master&FilePath={quote(src['path'], safe='')}"
+        return f"https://modelscope.cn/models/{src['repo']}/resolve/master/{src['path']}"
     if t == "hf":
         return f"https://huggingface.co/{src['repo']}/resolve/main/{src['path']}"
     if t == "hfmirror":
@@ -238,9 +238,9 @@ def probe_size(url, token):
 
 
 def verify_file(path: Path, kind: str, size: int):
-    if path.stat().st_size != size:
-        return False, f"size {path.stat().st_size} != {size}"
     try:
+        if path.stat().st_size != size:
+            return False, f"size {path.stat().st_size} != {size}"
         with open(path, "rb") as f:
             if kind == "safetensors":
                 n = int.from_bytes(f.read(8), "little")
@@ -300,6 +300,8 @@ class Download:
         if src.get("gated") and not tok:
             raise GatedError("gated source, no token")
         total, ranges, final = probe_size(url, tok)
+        if not tok:
+            url = final  # Token-authenticated sources retain their original host boundary.
         if total != self.size:
             raise RuntimeError(f"source reports {total} bytes, expected {self.size}")
         self.dest.parent.mkdir(parents=True, exist_ok=True)
@@ -464,11 +466,36 @@ def phase_preflight(st, root, args):
     st.log(f"install root: {root}")
     if str(root).startswith(("/output/ComfyUI", "/output/h3-")) or root.resolve() == Path("/output"):
         raise RuntimeError("refusing to install inside an existing H3 directory")
-    free = max(shutil.disk_usage(root).free, shutil.disk_usage((root / "models").resolve() if (root / "models").exists() else root).free) / 1e9
-    need_models = sum(m["size"] for m in MANIFEST["models"] if (args.with_gguf or m["group"] != "gguf")) / 1e9
-    st.log(f"free disk at root: {free:.0f} GB; models need {need_models:.0f} GB (+ scratch)")
-    if free < need_models * 1.3:
-        raise RuntimeError(f"not enough disk space: {free:.0f} GB free, need ~{max(MANIFEST['min_free_disk_gb'], need_models * 1.5):.0f} GB")
+    models = root / "models"
+    # Preserve an explicitly configured temporary store across container resets.
+    if models.is_symlink() and not models.exists():
+        models.resolve().mkdir(parents=True, exist_ok=True)
+    models.mkdir(parents=True, exist_ok=True)
+    missing = 0
+    for m in MANIFEST["models"]:
+        if m["group"] == "gguf" and not args.with_gguf:
+            continue
+        p = models / m["dir"] / m["name"]
+        if verify_file(p, m["kind"], m["size"])[0]:
+            continue
+        part = Path(str(p) + ".part")
+        allocated = getattr(part.stat(), "st_blocks", 0) * 512 if part.exists() else 0
+        missing += max(0, m["size"] - allocated)
+    free = shutil.disk_usage(models).free
+    needed = (0 if args.skip_models else missing) + 2_000_000_000
+    st.log(f"model store: {models.resolve()}; {free / 1e9:.1f} GB free; additional weights {missing / 1e9:.1f} GB (+ 2 GB headroom)")
+    if free < needed:
+        raise RuntimeError(f"not enough space at {models.resolve()}: {free / 1e9:.1f} GB free, need {needed / 1e9:.1f} GB")
+    # Ceph aggregate free space does not prove this rental's quota is writable.
+    for directory in dict.fromkeys((root, models)):
+        probe = directory / f".ltx-write-probe-{os.getpid()}"
+        try:
+            with probe.open("xb") as f:
+                f.write(b"\0" * (1024 * 1024))
+                f.flush()
+                os.fsync(f.fileno())
+        finally:
+            probe.unlink(missing_ok=True)
     try:
         out = subprocess.check_output(["nvidia-smi", "--query-gpu=name,memory.total,driver_version", "--format=csv,noheader"], text=True).strip()
         st.log("GPU: " + out)
@@ -609,16 +636,16 @@ def phase_deps(st, root, args):
     st.phase("deps", "running", 5)
     pip(st, root, ["-r", str(root / "ComfyUI" / "requirements.txt")], "deps")
     st.phase("deps", pct=70)
-    # comfy-kitchen >= 0.2.26 is mandatory for int8 convrot (the base env has 0.2.35)
+    # comfy-kitchen >= 0.2.40 provides int8 convrot and native CUDA sol_attn kernels
     r = subprocess.run([str(venv_python(root)), "-c", "import comfy_kitchen as c;from importlib.metadata import version;print(version('comfy-kitchen'))"], capture_output=True, text=True)
     ver = r.stdout.strip()
     st.log(f"comfy-kitchen {ver}")
     try:
-        ok = tuple(int(x) for x in ver.split(".")[:3]) >= (0, 2, 26)
+        ok = tuple(int(x) for x in ver.split(".")[:3]) >= (0, 2, 40)
     except Exception:
         ok = False
     if not ok:
-        pip(st, root, ["comfy-kitchen>=0.2.26"], "deps")
+        pip(st, root, ["comfy-kitchen>=0.2.40"], "deps")
     st.phase("deps", "done")
 
 
@@ -718,7 +745,7 @@ def phase_config(st, root, args):
     if not (cfg / "studio.json").exists():
         (cfg / "studio.json").write_text(json.dumps({
             "host": "127.0.0.1", "port": MANIFEST["ports"]["studio"], "comfy_port": MANIFEST["ports"]["comfy"],
-            "reserve_vram_gb": 2.0, "attention": "pytorch", "coordinate_h3": True, "h3_url": "http://127.0.0.1:8188",
+            "reserve_vram_gb": 2.0, "attention": "ck-int8", "cache_mode": "ram", "coordinate_h3": True, "h3_url": "http://127.0.0.1:8188",
             "release_vram_idle_s": 90, "auto_resume_jobs": True, "comfy_extra_args": []}, indent=2))
     st.phase("config", "done")
 
@@ -731,6 +758,8 @@ def phase_verify(st, root, args, failures):
             continue
         p = root / "models" / m["dir"] / m["name"]
         if not p.exists():
+            if m["required"] and (not getattr(args, "skip_models", False) or getattr(args, "verify_only", False)):
+                bad.append(f"{m['name']}: required model is missing")
             continue
         if p.is_symlink():
             bad.append(f"{m['name']} is a symlink/alias; aliases are never allowed")
@@ -748,7 +777,17 @@ def phase_verify(st, root, args, failures):
 def studio_api(root, path, method="POST"):
     tok = (root / "state" / "internal.token")
     if not tok.exists():
-        return None
+        # Studio also creates this token lazily. Waiting for it before the first
+        # internal request otherwise leaves both sides waiting forever.
+        import secrets
+        tok.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fd = os.open(tok, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            pass
+        else:
+            with os.fdopen(fd, "w") as f:
+                f.write(secrets.token_hex(24))
     cfg = json.loads((root / "config" / "studio.json").read_text())
     try:
         r = requests.request(method, f"http://127.0.0.1:{cfg['port']}{path}", headers={"X-Internal-Token": tok.read_text().strip()}, timeout=20)
@@ -764,8 +803,17 @@ def phase_services(st, root, args, models_ok):
         st.phase("services", "skipped", detail="core models not yet downloaded - worker not started")
         return False
     res = studio_api(root, "/api/internal/comfy/start")
+    if res is None:
+        # The CLI installs before starting Studio. Bootstrap only this stack,
+        # without invoking the installer recursively or restarting a live worker.
+        run([venv_python(root), root / "launcher.py", "--run-only", "--daemon"], st, cwd=root, phase="services", timeout=120)
+        res = studio_api(root, "/api/internal/comfy/start")
     st.log(f"studio -> comfy start: {res}")
-    if not res or res[0] != 200:
+    try:
+        accepted = bool(res and res[0] == 200 and json.loads(res[1]).get("success"))
+    except (ValueError, TypeError):
+        accepted = False
+    if not accepted:
         st.phase("services", "failed", detail="Studio server did not accept the start request")
         return False
     st.phase("services", "done")
@@ -825,7 +873,9 @@ def main():
     ap.add_argument("--root", default=os.environ.get("LTX_STUDIO_ROOT", str(PROJECT)))
     ap.add_argument("--no-gguf", dest="with_gguf", action="store_false", help="skip the optional 15.7 GB GGUF model")
     ap.add_argument("--skip-models", action="store_true")
-    ap.set_defaults(with_gguf=True)
+    ap.add_argument("--with-gguf", dest="with_gguf", action="store_true")
+    ap.add_argument("--verify-only", action="store_true", help="Recheck existing weights, services and nodes without installing or downloading")
+    ap.set_defaults(with_gguf=False)
     args = ap.parse_args()
     root = Path(args.root)
     root.mkdir(parents=True, exist_ok=True)
@@ -836,29 +886,52 @@ def main():
     except BlockingIOError:
         print("another installer run is active", file=sys.stderr)
         sys.exit(3)
+    previous_path = root / "state" / "install.json"
+    previous = json.loads(previous_path.read_text()) if args.verify_only and previous_path.exists() else None
     st = State(root)
     st.log(f"LTX Studio installer v{MANIFEST['version']} -> {root}")
     status = "done"
     failures = []
     try:
-        phase_preflight(st, root, args)
-        phase_system(st, root, args)
-        phase_config(st, root, args)  # dirs + studio.json first: the web server needs them
-        phase_repos(st, root, args)
-        phase_venv(st, root, args)
-        phase_deps(st, root, args)
-        phase_nodes(st, root, args)
-        failures = [] if args.skip_models else phase_models(st, root, args)
-        phase_verify(st, root, args, failures)
-        core_ok = not [m for m in failures if m["required"] and m["group"] == "core" and m["id"] in ("dit_int8", "vae_video", "vae_audio")]
-        started = phase_services(st, root, args, core_ok)
-        smoke = phase_smoke(st, root, args) if started else False
-        if args.skip_models:
-            status = "ready_for_models"
-        elif failures:
-            status = "needs_action"
-        elif not smoke:
-            status = "failed"
+        if args.verify_only:
+            completed = {p["id"] for p in (previous or {}).get("phases", []) if p["status"] == "done"}
+            required_phases = {"system", "repos", "venv", "deps", "nodes", "config"}
+            if not required_phases.issubset(completed):
+                raise RuntimeError("Verification-only requires a completed dependency installation; run the normal installer first")
+            for pid in required_phases:
+                st.phase(pid, "done", detail="Previously installed; service/node validation follows")
+            phase_preflight(st, root, args)
+            for m in MANIFEST["models"]:
+                if m["group"] == "gguf" and not args.with_gguf:
+                    continue
+                p = root / "models" / m["dir"] / m["name"]
+                ok, why = verify_file(p, m["kind"], m["size"])
+                st.file(m["id"], done=m["size"] if ok else 0, size=m["size"], status="done" if ok else "missing", name=m["name"], label=m["label"], required=m["required"], group=m["group"], message=why)
+            phase_verify(st, root, args, [])
+            st.phase("models", "done", detail="Existing required weights verified; no downloads")
+            started = phase_services(st, root, args, True)
+            smoke = phase_smoke(st, root, args) if started else False
+            if not smoke:
+                status = "failed"
+        else:
+            phase_preflight(st, root, args)
+            phase_system(st, root, args)
+            phase_config(st, root, args)  # dirs + studio.json first: the web server needs them
+            phase_repos(st, root, args)
+            phase_venv(st, root, args)
+            phase_deps(st, root, args)
+            phase_nodes(st, root, args)
+            failures = [] if args.skip_models else phase_models(st, root, args)
+            phase_verify(st, root, args, failures)
+            core_ok = not [m for m in failures if m["required"] and m["group"] == "core" and m["id"] in ("dit_int8", "vae_video", "vae_audio")]
+            started = phase_services(st, root, args, core_ok)
+            smoke = phase_smoke(st, root, args) if started else False
+            if args.skip_models:
+                status = "ready_for_models"
+            elif failures:
+                status = "needs_action"
+            elif not smoke:
+                status = "failed"
     except Exception as e:
         status = "failed"
         st.log("INSTALL FAILED: " + str(e), "error")
@@ -866,9 +939,10 @@ def main():
         for p in st.doc["phases"]:
             if p["status"] == "running":
                 p["status"] = "failed"
-    st.set(status=status, finished=now(), current=None)
-    st.log(f"installer finished: {status}")
-    st.close()
+    finally:
+        st.set(status=status, finished=now(), current=None)
+        st.log(f"installer finished: {status}")
+        st.close()
     sys.exit(0 if status in ("done", "needs_action") else 1)
 
 

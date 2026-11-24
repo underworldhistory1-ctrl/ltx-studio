@@ -4,7 +4,7 @@ from pathlib import Path
 
 import aiohttp
 
-from common import ROOT, DIRS, load_config, atomic_write_json, read_json
+from common import ROOT, DIRS, load_config, atomic_write_json, read_json, ram_limits
 
 
 class PromptRejected(Exception):
@@ -98,14 +98,20 @@ class ComfyProcess:
             cmd += ["--use-ck-attention"]
         elif "--use-pytorch-cross-attention" in caps:
             cmd += ["--use-pytorch-cross-attention"]
-        cm = cfg.get("cache_mode", "none")
+        cm = cfg.get("cache_mode", "ram")
+        extra_args = [str(a) for a in cfg.get("comfy_extra_args", [])]
         if cm == "none" and "--cache-none" in caps:
             cmd += ["--cache-none"]
         elif cm == "ram" and "--cache-ram" in caps:
-            cmd += ["--cache-ram"]
+            if "--cache-ram" not in extra_args:
+                total_gb, _ = ram_limits()
+                if 0 < total_gb < 56:
+                    cmd += ["--cache-ram", "6", "12"]
+                else:
+                    cmd += ["--cache-ram"]
         if "--disable-auto-launch" in caps:
             cmd += ["--disable-auto-launch"]
-        cmd += [str(a) for a in cfg.get("comfy_extra_args", [])]
+        cmd += extra_args
         return cmd
 
     # --- control
@@ -235,6 +241,12 @@ class ComfyClient:
             self._oi = await self._get_json("/object_info", 120)
             self._oi_t = time.time()
         return self._oi
+
+    async def supports_node(self, node_name: str) -> bool:
+        try:
+            return node_name in (await self.object_info())
+        except Exception:
+            return False
 
     async def queue(self):
         return await self._get_json("/queue", 10)

@@ -328,6 +328,12 @@
                   </label>
                   <p class="field-hint">Skips loading the 15.4 GB Gemma 4 Text Encoder. Bit-identical output, saves ~15 GB VRAM/RAM and speeds up render startup.</p>
 
+                  <label class="checkbox-label" style="margin-top: 10px;">
+                    <input type="checkbox" id="sparse-attn-chk" checked>
+                    <strong>Sol-Attn Sparse Attention · Faster 1080p / 2K / 4K</strong>
+                  </label>
+                  <p class="field-hint">Accelerates LTX-2.5 video self-attention layers (~1.8x faster stepping after 20% dense warmup) using ComfyUI native BlockSparseAttention while keeping audio and cross-attention 100% dense.</p>
+
                   <div id="custom-encoder-sub" style="display:none; margin-top: 8px;">
                     <div class="option-field">
                       <label for="encoder-select">Text Encoder File</label>

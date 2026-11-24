@@ -8,8 +8,8 @@
   "repos": {
     "comfyui": {
       "url": "https://github.com/comfyanonymous/ComfyUI.git",
-      "commit": "b65d1ffaca35fcda5889e120dcd0c8520553c7b2",
-      "fallback_commit": "3b4c0b0e457cf0a51cf3038e0a6750d8f96ce251"
+      "commit": "426f5eea52a7ece1dd599fff4cb6cd1f352ddd24",
+      "fallback_commit": "b65d1ffaca35fcda5889e120dcd0c8520553c7b2"
     },
     "ltxvideo": {
       "url": "https://github.com/Lightricks/ComfyUI-LTXVideo.git",

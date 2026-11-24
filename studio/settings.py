@@ -19,6 +19,7 @@ DEFAULTS = {
     "guide_strength": 1.0, "lora_strength": 1.0,
     "seed": 42, "randomize_seed": False,
     "precision": "int8", "gguf_file": "LTX-2.5-Distilled-Q4_K_M.gguf",
+    "sparse_attention": True, "sparse_tau": 1.3, "sparse_start_percent": 0.2,
     "cached_cond": True, "encoder": "", "clip_device": "default",
     "prompt_positive": "", "prompt_negative": "",
     "sampler_name": "euler", "sigmas_mode": "distilled", "sigmas_custom": DISTILLED_SIGMAS,
@@ -78,6 +79,10 @@ SCHEMA = [
         {"key": "precision", "label": "Transformer", "type": "select", "options": OPTIONS["precision"],
          "labels": {"int8": "INT8 ConvRot (CUDA kernels, default)", "gguf": "GGUF Q4_K_M (low VRAM)"}},
         {"key": "gguf_file", "label": "GGUF file", "type": "select", "options_from": "ggufs", "show_if": {"precision": "gguf"}},
+        {"key": "sparse_attention", "label": "Sol-Attn Sparse Attention (faster 1080p/2K/4K)", "type": "bool",
+         "help": "Uses ComfyUI native BlockSparseAttention (Sol-Attn) on LTX-2.5 video self-attention layers after the first 20% warmup steps. Keeps audio and cross-attention 100% dense."},
+        {"key": "sparse_tau", "label": "Sol-Attn threshold (tau)", "type": "range", "min": 0.5, "max": 2.5, "step": 0.05, "show_if": {"sparse_attention": True}, "advanced": True},
+        {"key": "sparse_start_percent", "label": "Sol-Attn warmup start", "type": "range", "min": 0.0, "max": 0.6, "step": 0.05, "show_if": {"sparse_attention": True}, "advanced": True},
         {"key": "cached_cond", "label": "Cached conditioning (skip text encoder)", "type": "bool",
          "help": "Bit-identical for the built-in prompts, saves ~15 GB and time. Turned off automatically when you edit the prompts."},
         {"key": "encoder", "label": "Text encoder", "type": "select", "options_from": "encoders", "show_if": {"cached_cond": False}, "advanced": True},
@@ -191,6 +196,8 @@ def normalize(raw: dict):
         s["sampler_name"] = "euler"
     s["guide_strength"] = _clamp(s["guide_strength"], 0.3, 1.0)
     s["lora_strength"] = _clamp(s["lora_strength"], 0.0, 1.5)
+    s["sparse_tau"] = _clamp(s["sparse_tau"], 0.5, 2.5)
+    s["sparse_start_percent"] = _clamp(s["sparse_start_percent"], 0.0, 1.0)
     s["crf"] = int(_clamp(s["crf"], 8, 28))
     s["color_strength"] = _clamp(s["color_strength"], 0.0, 1.0)
     s["protect_skin"] = _clamp(s["protect_skin"], 0.0, 1.0)
@@ -244,6 +251,6 @@ def normalize(raw: dict):
 def graph_hash_keys():
     """Settings that change what a rendered chunk looks like (used for resume hashing)."""
     return ["mode", "restore_first", "resolution_mode", "scale", "preset_long_edge", "guide_strength", "lora_strength", "seed",
-            "precision", "gguf_file", "cached_cond", "encoder", "clip_device", "prompt_positive", "prompt_negative",
+            "precision", "gguf_file", "sparse_attention", "sparse_tau", "sparse_start_percent", "cached_cond", "encoder", "clip_device", "prompt_positive", "prompt_negative",
             "sampler_name", "sigmas_mode", "sigmas_custom", "tile_mode", "tile_w", "tile_h", "overlap_frac", "blend_var",
             "grid_cycle", "tile_frames", "canvas_device", "video_vae", "audio_vae", "decode_tile", "decode_temporal"]

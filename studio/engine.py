@@ -432,6 +432,7 @@ class Engine:
         rendered_parts = []
         save_opts = await self.comfy.save_options(crf=int(settings.get("crf", 14)))
         num_passes = 2 if two_pass_restore else 1
+        sparse_ok = await self.comfy.supports_node("BlockSparseAttention")
 
         for idx, chunk in enumerate(chunks):
             if job.get("status") == "cancelled":
@@ -513,7 +514,7 @@ class Engine:
 
                     up_p1 = await self.comfy.upload(str(c_input))
                     p1_settings = {**settings, "mode": "restore", "restore_first": False}
-                    p1_prompt = build_workflow(p1_settings, up_p1, f"{c_tag}_p1", rw, rh, cw, ch, save_options=save_opts)
+                    p1_prompt = build_workflow(p1_settings, up_p1, f"{c_tag}_p1", rw, rh, cw, ch, save_options=save_opts, sparse_available=sparse_ok)
                     await self._run_comfy_prompt(
                         job, p1_prompt, {"job_id": job_id, "chunk": idx, "pass": 1},
                         p1_raw, rw, rh, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=2
@@ -536,7 +537,7 @@ class Engine:
 
                 up_p2 = await self.comfy.upload(str(p2_in))
                 p2_settings = {**settings, "mode": "refine", "restore_first": False}
-                p2_prompt = build_workflow(p2_settings, up_p2, c_tag, tw, th, rw, rh, save_options=save_opts)
+                p2_prompt = build_workflow(p2_settings, up_p2, c_tag, tw, th, rw, rh, save_options=save_opts, sparse_available=sparse_ok)
                 await self._run_comfy_prompt(
                     job, p2_prompt, {"job_id": job_id, "chunk": idx, "pass": 2},
                     dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=1, num_passes=2
@@ -552,7 +553,7 @@ class Engine:
                     subprocess.run(["ffmpeg", "-y", "-v", "error", "-i", str(c_input), "-frames:v", "1", "-update", "1", str(frm_path)], check=True)
                     first_frame_name = await self.comfy.upload(str(frm_path))
 
-                prompt = build_workflow(settings, up_name, c_tag, tw, th, cw, ch, save_options=save_opts, first_frame_image_name=first_frame_name)
+                prompt = build_workflow(settings, up_name, c_tag, tw, th, cw, ch, save_options=save_opts, first_frame_image_name=first_frame_name, sparse_available=sparse_ok)
                 await self._run_comfy_prompt(
                     job, prompt, {"job_id": job_id, "chunk": idx},
                     dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=1

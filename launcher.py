@@ -42,6 +42,8 @@ STATE_DIR = ROOT / "state"
 MODELS_DIR = ROOT / "models"
 
 for d in (CONFIG_DIR, LOGS_DIR, STATE_DIR, MODELS_DIR):
+    if d == MODELS_DIR and d.is_symlink() and not d.exists():
+        d.resolve().mkdir(parents=True, exist_ok=True)
     d.mkdir(parents=True, exist_ok=True)
 
 # Ensure environment knows its root
@@ -144,7 +146,8 @@ def load_studio_config():
         "port": 7860,
         "comfy_port": 8189,
         "reserve_vram_gb": 2.0,
-        "attention": "pytorch",
+        "attention": "ck-int8",
+        "cache_mode": "ram",
         "coordinate_h3": True,
         "h3_url": "http://127.0.0.1:8188",
         "release_vram_idle_s": 90,
@@ -357,8 +360,12 @@ def run_installer(args):
     cmd = [py, str(installer_script), "--root", str(ROOT)]
     if args.no_gguf:
         cmd.append("--no-gguf")
+    else:
+        cmd.append("--with-gguf")
     if args.skip_models:
         cmd.append("--skip-models")
+    if args.verify_only:
+        cmd.append("--verify-only")
 
     if args.hf_token:
         (STATE_DIR / "hf.token").write_text(args.hf_token.strip())
@@ -452,6 +459,7 @@ def main():
     parser.add_argument("--install-only", action="store_true", help="Run full installation and model download, then exit")
     parser.add_argument("--run-only", action="store_true", help="Start services directly without running installer checks")
     parser.add_argument("--skip-models", action="store_true", help="Skip model weights download in installer")
+    parser.add_argument("--verify-only", action="store_true", help="Recheck installed weights, worker and nodes without downloads or dependency installation")
     parser.add_argument("--no-gguf", action="store_true", default=True, help="Skip downloading optional 15.7 GB GGUF model")
     parser.add_argument("--with-gguf", action="store_false", dest="no_gguf", help="Download optional 15.7 GB GGUF model")
     parser.add_argument("--port", type=int, default=None, help="Studio Web UI port (default: 7860)")
@@ -464,6 +472,8 @@ def main():
     parser.add_argument("--restart", action="store_true", help="Restart Studio services")
 
     args = parser.parse_args()
+    if args.verify_only:
+        args.install_only = True
 
     # Subcommands
     if args.status:

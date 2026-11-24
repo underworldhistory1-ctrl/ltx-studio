@@ -43,7 +43,7 @@ def apply_cached_conditioning(pr: dict, name: str, out_node: str = N_SAVE) -> di
     return prune_unreachable(pr, out_node)
 
 
-def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw: int, th: int, cw: int, ch: int, save_options: dict = None, first_frame_image_name: str = None) -> dict:
+def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw: int, th: int, cw: int, ch: int, save_options: dict = None, first_frame_image_name: str = None, sparse_available: bool = True) -> dict:
     mode = settings.get("mode", "refine")
     is_pixel = (mode == "pixel")
     wf_path = WF_PIXEL_PATH if is_pixel else WF_REFINE_PATH
@@ -143,6 +143,27 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
         for nid in ("5014:5504", "5014:5505"):
             if nid in pr and "ckpt_name" in pr[nid]["inputs"]:
                 pr[nid]["inputs"]["ckpt_name"] = gguf_name
+
+    # 5b. Native ComfyUI BlockSparseAttention (Sol-Attn) on LTX-2.5 video self-attention
+    if bool(settings.get("sparse_attention", True)) and sparse_available and "5004:5606" in pr:
+        target_node = "5516:4828" if is_pixel else N_SAMPLER
+        if target_node in pr and "model" in pr[target_node].get("inputs", {}):
+            pr["5004:5607"] = {
+                "class_type": "BlockSparseAttention",
+                "inputs": {
+                    "model": ["5004:5606", 0],
+                    "selection": "sol-attn",
+                    "selection.tau": float(settings.get("sparse_tau", 1.3)),
+                    "start_percent": float(settings.get("sparse_start_percent", 0.2)),
+                    "end_percent": 1.0,
+                    "dense_blocks": "",
+                    "min_tokens": 4096,
+                    "extra_tokens": 256,
+                    "sink_conditioning": "off",
+                    "verbose": False,
+                },
+            }
+            pr[target_node]["inputs"]["model"] = ["5004:5607", 0]
 
     # 6. Prompts & Conditioning
     has_custom_prompts = bool((settings.get("prompt_positive") or "").strip() or (settings.get("prompt_negative") or "").strip())

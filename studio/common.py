@@ -21,7 +21,7 @@ for d in DIRS.values():
 
 DEFAULT_CONFIG = {
     "host": "0.0.0.0", "port": 7860, "comfy_port": 8189,
-    "reserve_vram_gb": 2.0, "attention": "pytorch", "cache_mode": "none",
+    "reserve_vram_gb": 2.0, "attention": "ck-int8", "cache_mode": "ram",
     "coordinate_h3": True, "h3_url": "http://127.0.0.1:8188",
     "release_vram_idle_s": 90, "auto_resume_jobs": True, "comfy_extra_args": [],
     "alloc_conf": "expandable_segments:True",
