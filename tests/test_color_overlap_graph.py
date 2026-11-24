@@ -162,6 +162,13 @@ class WaveletAndStitchTests(unittest.TestCase):
         self.assertAlmostEqual(fixed_L - base_L, 5.0, delta=0.8)
 
     def test_settings_defaults_and_clamping(self):
+        self.assertEqual(settings.DEFAULTS["resolution_mode"], "preset")
+        self.assertEqual(settings.DEFAULTS["preset_long_edge"], 2560)
+        self.assertEqual(settings.BUILTIN_PRESETS["identity_safe"]["settings"]["resolution_mode"], "preset")
+        self.assertEqual(settings.BUILTIN_PRESETS["identity_safe"]["settings"]["preset_long_edge"], 2560)
+        geom = video.target_resolution(1920, 1080, "refine", "preset", 1.5, 2560)
+        self.assertEqual((geom["tw"], geom["th"]), (2560, 1440))
+        self.assertEqual(geom["aspect_error"], 0.0)
         self.assertEqual(settings.DEFAULTS["color_mode"], "wavelet")
         self.assertEqual(settings.DEFAULTS["chunk_overlap"], 8)
         self.assertFalse(settings.DEFAULTS["protect_faces"])

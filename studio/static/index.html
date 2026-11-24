@@ -83,7 +83,7 @@
               <label for="preset-select">Studio Preset</label>
               <div class="preset-row">
                 <select id="preset-select" class="select-field">
-                  <option value="identity_safe">Faces & Identity Safe (Recommended)</option>
+                  <option value="identity_safe">Faces &amp; Identity Safe (2.5K Recommended)</option>
                   <option value="detail_4k">4K Detail, Single Pass</option>
                   <option value="max_texture">Max Texture (Pixel, Fast)</option>
                   <option value="old_footage">Old Footage: Restore then Refine</option>
@@ -191,11 +191,11 @@
               </div>
 
               <div class="res-mode-tabs">
-                <button type="button" class="res-tab active" data-resmode="scale">Scale Factor</button>
-                <button type="button" class="res-tab" data-resmode="preset">Dimension Preset</button>
+                <button type="button" class="res-tab" data-resmode="scale">Scale Factor</button>
+                <button type="button" class="res-tab active" data-resmode="preset">Dimension Preset</button>
               </div>
 
-              <div id="scale-control-wrap" class="res-control-wrap">
+              <div id="scale-control-wrap" class="res-control-wrap" style="display:none;">
                 <div class="slider-header">
                   <span>Upscale Multiplier: <strong id="scale-val">1.50x</strong></span>
                   <span class="sub-hint">1.0x (In-place) • 1.5x (Sweet spot) • 2.0x (4K)</span>
@@ -203,12 +203,12 @@
                 <input type="range" id="scale-slider" min="1.0" max="2.0" step="0.05" value="1.5">
               </div>
 
-              <div id="preset-control-wrap" class="res-control-wrap" style="display:none;">
+              <div id="preset-control-wrap" class="res-control-wrap">
                 <label for="long-edge-select">Target Long Edge</label>
                 <select id="long-edge-select" class="select-field">
                   <option value="1280">720p Class (1280 px)</option>
-                  <option value="1920" selected>Full HD (1920 px)</option>
-                  <option value="2560">2.5K Quad HD (2560 px)</option>
+                  <option value="1920">Full HD (1920 px)</option>
+                  <option value="2560" selected>2.5K Quad HD (2560 px)</option>
                   <option value="3840">4K Ultra HD (3840 px)</option>
                 </select>
               </div>
@@ -723,6 +723,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=wavelet-overlap-v4"></script>
+  <script src="/static/app.js?v=preset-2560-v5"></script>
 </body>
 </html>

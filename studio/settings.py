@@ -15,7 +15,7 @@ DISTILLED_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421
 
 DEFAULTS = {
     "mode": "refine", "restore_first": False,
-    "resolution_mode": "scale", "scale": 1.5, "preset_long_edge": 1920,
+    "resolution_mode": "preset", "scale": 1.5, "preset_long_edge": 2560,
     "guide_strength": 1.0, "lora_strength": 1.0,
     "seed": 42, "randomize_seed": False,
     "precision": "int8", "gguf_file": "LTX-2.5-Distilled-Q4_K_M.gguf",
@@ -158,11 +158,11 @@ SCHEMA = [
 ]
 
 BUILTIN_PRESETS = {
-    "identity_safe": {"label": "Faces & identity safe (recommended)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "identity_safe": {"label": "Faces & identity safe (2.5K recommended)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 2560, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
     "detail_4k": {"label": "4K detail, single pass", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 3840, "guide_strength": 1.0, "cached_cond": True, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
     "max_texture": {"label": "Max texture (Pixel, fast)", "settings": {"mode": "pixel", "restore_first": False, "resolution_mode": "scale", "scale": 2.0, "chunk_overlap": 4, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
-    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "temporal", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
-    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "restore_first": False, "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0}},
+    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "resolution_mode": "preset", "preset_long_edge": 2560, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "temporal", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 2560, "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0}},
     "in_place": {"label": "Re-detail in place (1.0x)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.0, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
 }
 

@@ -392,7 +392,7 @@ function applyPreset(presetKey) {
   if (rfRow) rfRow.style.display = (mode === 'refine') ? 'block' : 'none';
   document.getElementById('restore-first-chk').checked = Boolean(s.restore_first && mode === 'refine');
 
-  const resMode = s.resolution_mode || 'scale';
+  const resMode = s.resolution_mode || 'preset';
   document.querySelectorAll('.res-tab').forEach(t => {
     t.classList.toggle('active', t.dataset.resmode === resMode);
   });
@@ -457,7 +457,7 @@ function collectSettings(isTest = false) {
   const mode = activeMode?.dataset?.mode || 'refine';
 
   const activeRes = document.querySelector('.res-tab.active');
-  const resMode = activeRes?.dataset?.resmode || 'scale';
+  const resMode = activeRes?.dataset?.resmode || 'preset';
 
   const getVal = (id, def = '') => {
     const el = document.getElementById(id);
@@ -481,7 +481,7 @@ function collectSettings(isTest = false) {
     restore_first: getChecked('restore-first-chk', false),
     resolution_mode: resMode,
     scale: getFloat('scale-slider', 1.5),
-    preset_long_edge: getInt('long-edge-select', 1920),
+    preset_long_edge: getInt('long-edge-select', 2560),
     guide_strength: getFloat('guide-slider', 1.0),
     lora_strength: getFloat('lora-slider', 1.0),
     seed: getInt('seed-input', 42),
