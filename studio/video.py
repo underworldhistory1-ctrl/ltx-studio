@@ -213,14 +213,20 @@ def render_length_8n1(n: int) -> int:
     return n if n % 8 == 1 else ((n - 1) // 8 + 1) * 8 + 1
 
 
-def smart_chunking(total_frames: int, fps: float, scene_cuts_s: list, budget_fmp: float, tw: int, th: int, refine: bool = True, max_chunk_s: float = 0.0, min_sec: float = 2.0):
-    """Tiles video into contiguous chunks snapped to scene cuts where possible, all length 8n+1."""
+def smart_chunking(total_frames: int, fps: float, scene_cuts_s: list, budget_fmp: float, tw: int, th: int, refine: bool = True, max_chunk_s: float = 0.0, min_sec: float = 2.0, overlap_frames: int = 8):
+    """Tiles video into chunks snapped to scene cuts where possible, all render lengths 8n+1.
+
+    Non-cut boundaries include ``overlap_frames`` pre-roll frames shared with the preceding chunk's
+    tail so assembly can blend transitions with a cosine crossfade + overlap color anchor.
+    Boundaries aligned to detected scene cuts keep 0 overlap to preserve crisp cuts.
+    """
     dur = total_frames / fps
     minf = max(9, int(min_sec * fps))
+    req_overlap = max(0, int(overlap_frames))
 
     # Calculate max duration per chunk from memory budget (frame-megapixels)
     mp_per_frame = (tw * th) / 1e6
-    extra_reserve = 7 + (8 if refine else 0)
+    extra_reserve = 7 + (8 if refine else 0) + req_overlap
     maxf_budget = max(9.0, (budget_fmp / mp_per_frame) - extra_reserve)
 
     if max_chunk_s > 0:
@@ -252,6 +258,14 @@ def smart_chunking(total_frames: int, fps: float, scene_cuts_s: list, budget_fmp
     chunks = []
     for idx, (a, b) in enumerate(zip(bounds, bounds[1:])):
         chunk_frames = b - a
+        is_cut = idx > 0 and any(abs(a - c) <= 1 for c in cutf)
+        if idx == 0 or is_cut or req_overlap <= 0:
+            ov_prev = 0
+        else:
+            prev_len = bounds[idx] - bounds[idx - 1]
+            ov_prev = min(req_overlap, prev_len // 3, chunk_frames // 3)
+        extract_start = a - ov_prev
+        extract_frames = chunk_frames + ov_prev
         start_s = a / fps
         end_s = b / fps
         chunks.append({
@@ -259,10 +273,15 @@ def smart_chunking(total_frames: int, fps: float, scene_cuts_s: list, budget_fmp
             "start_frame": a,
             "end_frame": b,
             "frames": chunk_frames,
+            "overlap_prev": ov_prev,
+            "extract_start_frame": extract_start,
+            "extract_start_s": round(extract_start / fps, 3),
+            "extract_frames": extract_frames,
+            "is_cut_boundary": is_cut,
             "start_s": round(start_s, 3),
             "end_s": round(end_s, 3),
             "duration_s": round(end_s - start_s, 3),
-            "render_frames": render_length_8n1(chunk_frames) + (8 if refine else 0)
+            "render_frames": render_length_8n1(extract_frames) + (8 if refine else 0)
         })
 
     return chunks

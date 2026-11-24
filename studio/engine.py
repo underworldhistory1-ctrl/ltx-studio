@@ -18,6 +18,16 @@ class JobCancelled(Exception):
     pass
 
 
+def _src_seek_input_args(src: str, start_s: float, fps: float):
+    """Frame-accurate two-stage ffmpeg seek matching chunk extraction and colorfix alignment."""
+    seek_t = max(0.0, float(start_s) - 0.5 / max(1.0, float(fps)))
+    pre_seek = max(0.0, seek_t - 5.0) if seek_t > 15.0 else 0.0
+    post_seek = seek_t - pre_seek
+    pre_args = ["-ss", f"{pre_seek:.6f}"] if pre_seek > 0 else []
+    post_args = ["-ss", f"{post_seek:.6f}"] if post_seek > 1e-6 else []
+    return pre_args, post_args
+
+
 class Engine:
     def __init__(self, comfy_client: ComfyClient = None):
         self.comfy = comfy_client or ComfyClient()
@@ -178,8 +188,9 @@ class Engine:
 
         required = [
             ("Video VAE", mdir / "vae" / settings.get("video_vae", "ltx-2.5-video-vae-bf16.safetensors")),
-            ("Audio VAE", mdir / "vae" / settings.get("audio_vae", "ltx-2.5-audio-vae-bf16.safetensors")),
         ]
+        if mode == "pixel" or settings.get("audio_mode", "original") == "generated":
+            required.append(("Audio VAE", mdir / "vae" / settings.get("audio_vae", "ltx-2.5-audio-vae-bf16.safetensors")))
 
         if precision == "gguf":
             required.append(("GGUF Transformer", mdir / "unet" / settings.get("gguf_file", "LTX-2.5-Distilled-Q4_K_M.gguf")))
@@ -394,7 +405,10 @@ class Engine:
             total_frames = test_f
             chunks = [{
                 "index": 0, "start_frame": 0, "end_frame": test_f,
-                "frames": test_f, "start_s": 0.0, "end_s": dur,
+                "frames": test_f, "overlap_prev": 0,
+                "extract_start_frame": 0, "extract_start_s": 0.0, "extract_frames": test_f,
+                "is_cut_boundary": False,
+                "start_s": 0.0, "end_s": dur,
                 "duration_s": dur, "render_frames": test_f + (8 if mode != "pixel" else 0)
             }]
             cuts = []
@@ -415,12 +429,16 @@ class Engine:
                     total_ram_gb, _ = ram_limits()
                     budget = 500.0 if total_ram_gb >= 64 else max(240.0, min(360.0, (total_ram_gb - 22.0) * 16.0))
             max_c_s = float(settings.get("max_chunk_s", 0.0))
+            req_overlap = int(settings.get("chunk_overlap", 8))
             # If resuming a job that already has completed chunk files on disk, keep its existing chunk layout
             existing_chunks = job.get("chunks")
             if existing_chunks and any((work_dir / f"out_ltx_{job_id}_c{i:03d}.mp4").exists() for i in range(len(existing_chunks))):
                 chunks = existing_chunks
             else:
-                chunks = smart_chunking(total_frames, fps, cuts_for_chunking, budget, tw, th, refine=(mode != "pixel"), max_chunk_s=max_c_s)
+                chunks = smart_chunking(
+                    total_frames, fps, cuts_for_chunking, budget, tw, th,
+                    refine=(mode != "pixel"), max_chunk_s=max_c_s, overlap_frames=req_overlap
+                )
 
         job["chunks"] = chunks
         job["total_chunks"] = len(chunks)
@@ -429,10 +447,17 @@ class Engine:
         on_update(job)
 
         # 4. Process each chunk
-        rendered_parts = []
-        save_opts = await self.comfy.save_options(crf=int(settings.get("crf", 14)))
+        audio_mode = settings.get("audio_mode", "original")
+        keep_gen_audio = (audio_mode == "generated")
+        need_chunk_audio = (mode == "pixel") or keep_gen_audio
+
+        rendered_specs = []
+        # Use near-lossless CRF 4 for ComfyUI SaveVideo intermediates so micro-detail is never degraded
+        # before assembly and Wavelet Color Fix; final user CRF is applied once at export.
+        save_opts = await self.comfy.save_options(crf=4)
         num_passes = 2 if two_pass_restore else 1
         sparse_ok = await self.comfy.supports_node("BlockSparseAttention")
+        vf_geom = f"scale={cw}:{ch}:flags=lanczos" if geom["fit"] == "resize" else (f"crop={cw}:{ch}" if geom["fit"] == "crop" else "")
 
         for idx, chunk in enumerate(chunks):
             if job.get("status") == "cancelled":
@@ -440,14 +465,17 @@ class Engine:
 
             c_tag = f"ltx_{job_id}_c{idx:03d}"
             c_input = work_dir / f"in_{c_tag}.mp4"
-            c_frames = chunk["frames"]
-            r_len = chunk["render_frames"]
-            s_time = r_s + chunk["start_s"]
+            c_frames = int(chunk["frames"])
+            ov_prev = int(chunk.get("overlap_prev", 0))
+            extract_f = int(chunk.get("extract_frames", c_frames))
+            r_len = int(chunk["render_frames"])
+            ex_start_s = float(chunk.get("extract_start_s", chunk["start_s"]))
+            s_time = r_s + ex_start_s
 
             job["current_chunk"] = idx + 1
             dst_chunk = work_dir / f"out_{c_tag}.mp4"
 
-            # Resume check: if this chunk was already rendered and trimmed to exact c_frames & target resolution, reuse it
+            # Resume check: if this chunk was already rendered and trimmed to exact extract_f & target resolution, reuse it
             if dst_chunk.exists() and dst_chunk.stat().st_size > 1000:
                 try:
                     existing_f = int(subprocess.check_output([
@@ -459,36 +487,37 @@ class Engine:
                         "-show_entries", "stream=width,height", "-of", "csv=p=0", str(dst_chunk)
                     ], text=True).strip()
                     wh_chk = [int(v) for v in dims_chk.split(",")[:2] if v.strip().isdigit()]
-                    if existing_f == c_frames and wh_chk == [tw, th]:
-                        rendered_parts.append(str(dst_chunk))
+                    if existing_f == extract_f and wh_chk == [tw, th]:
+                        rendered_specs.append({
+                            "path": str(dst_chunk), "extract_frames": extract_f,
+                            "frames": c_frames, "overlap_prev": ov_prev,
+                        })
                         continue
                 except Exception:
                     pass
 
-            # Extract chunk video with frame-accurate post-input seek and BT.709 color tags
-            vf = f"scale={cw}:{ch}:flags=lanczos" if geom["fit"] == "resize" else (f"crop={cw}:{ch}" if geom["fit"] == "crop" else "null")
-            past_end = (round(s_time * fps) + r_len > round(src_dur * fps)) or (chunk["start_s"] + (r_len / fps) > dur)
+            # Extract chunk video losslessly (-crf 0 -preset ultrafast) with frame-accurate seek & BT.709 tags
+            vf = vf_geom or "null"
+            past_end = (round(s_time * fps) + r_len > round(src_dur * fps)) or (ex_start_s + (r_len / fps) > dur)
             pad = f",tpad=stop_mode=clone:stop_duration={r_len / fps:.3f}" if (idx == len(chunks) - 1 or past_end) else ""
-            seek_t = max(0.0, s_time - 0.5 / fps)
-            pre_seek = max(0.0, seek_t - 5.0) if seek_t > 15.0 else 0.0
-            post_seek = seek_t - pre_seek
-            cut_cmd = ["ffmpeg", "-y", "-v", "error"]
-            if pre_seek > 0:
-                cut_cmd += ["-ss", f"{pre_seek:.6f}"]
-            cut_cmd += ["-i", src]
-            if not info["has_audio"]:
+            pre_s, post_s = _src_seek_input_args(src, s_time, fps)
+            cut_cmd = ["ffmpeg", "-y", "-v", "error", *pre_s, "-i", src]
+            if need_chunk_audio and not info["has_audio"]:
                 cut_cmd += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
             cut_cmd += [
-                "-ss", f"{post_seek:.6f}",
+                *post_s,
                 "-frames:v", str(r_len), "-vf", vf + pad,
-                "-c:v", "libx264", "-crf", "14", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                "-c:a", "aac", "-b:a", "192k"
             ]
-            if info["has_audio"]:
-                cut_cmd += ["-af", "apad", "-shortest"]
+            if need_chunk_audio:
+                cut_cmd += ["-c:a", "aac", "-b:a", "192k"]
+                if info["has_audio"]:
+                    cut_cmd += ["-af", "apad", "-shortest"]
+                else:
+                    cut_cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
             else:
-                cut_cmd += ["-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+                cut_cmd += ["-an"]
             cut_cmd += [str(c_input)]
             subprocess.run(cut_cmd, check=True)
 
@@ -509,7 +538,7 @@ class Engine:
                         pass
 
                 if not p1_done:
-                    job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 1/2: Restore ({c_frames} frames @ {rw}x{rh})..."
+                    job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 1/2: Restore ({extract_f} frames @ {rw}x{rh})..."
                     on_update(job)
 
                     up_p1 = await self.comfy.upload(str(c_input))
@@ -520,19 +549,27 @@ class Engine:
                         p1_raw, rw, rh, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=2
                     )
 
-                # Re-mux Pass 1 restored video with padded chunk audio and BT.709 tags as input for Pass 2
-                # (-af apad before -shortest ensures shorter source audio never truncates the +8 padded video frames)
+                # Lossless handoff from Pass 1 Restore into Pass 2 Refine (keeping padded audio only when needed)
                 p2_in = work_dir / f"in_p2_{c_tag}.mp4"
-                subprocess.run([
-                    "ffmpeg", "-y", "-v", "error", "-i", str(p1_raw), "-i", str(c_input),
-                    "-map", "0:v:0", "-map", "1:a:0", "-frames:v", str(r_len),
-                    "-c:v", "libx264", "-crf", "12", "-pix_fmt", "yuv420p",
+                p2_cmd = ["ffmpeg", "-y", "-v", "error", "-i", str(p1_raw)]
+                if need_chunk_audio:
+                    p2_cmd += ["-i", str(c_input), "-map", "0:v:0", "-map", "1:a:0"]
+                else:
+                    p2_cmd += ["-map", "0:v:0"]
+                p2_cmd += [
+                    "-frames:v", str(r_len),
+                    "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                     "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                    "-c:a", "aac", "-b:a", "192k", "-af", "apad", "-shortest", str(p2_in)
-                ], check=True)
+                ]
+                if need_chunk_audio:
+                    p2_cmd += ["-c:a", "aac", "-b:a", "192k", "-af", "apad", "-shortest"]
+                else:
+                    p2_cmd += ["-an"]
+                p2_cmd += [str(p2_in)]
+                subprocess.run(p2_cmd, check=True)
 
                 # Pass 2: Refine Details IC-LoRA at final target resolution (tw x th)
-                job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 2/2: Refine Details ({c_frames} frames @ {tw}x{th})..."
+                job["stage"] = f"Chunk {idx + 1}/{len(chunks)} — Pass 2/2: Refine Details ({extract_f} frames @ {tw}x{th})..."
                 on_update(job)
 
                 up_p2 = await self.comfy.upload(str(p2_in))
@@ -543,7 +580,8 @@ class Engine:
                     dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=1, num_passes=2
                 )
             else:
-                job["stage"] = f"Rendering chunk {idx + 1}/{len(chunks)} ({c_frames} frames @ {tw}x{th})..."
+                ov_lbl = f" (+{ov_prev} overlap)" if ov_prev > 0 else ""
+                job["stage"] = f"Rendering chunk {idx + 1}/{len(chunks)} ({c_frames} frames{ov_lbl} @ {tw}x{th})..."
                 on_update(job)
 
                 up_name = await self.comfy.upload(str(c_input))
@@ -559,84 +597,123 @@ class Engine:
                     dst_chunk, tw, th, on_update, t_start, idx, len(chunks), pass_idx=0, num_passes=1
                 )
 
-            # Verify output frame count and trim extra 8 frames if refine padding was applied
+            # Verify output frame count and trim extra +8 refine tail padding losslessly
             actual_f = int(subprocess.check_output([
                 "ffprobe", "-v", "error", "-count_frames", "-select_streams", "v:0",
                 "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", str(dst_chunk)
             ], text=True).strip() or "0")
 
-            if actual_f < c_frames:
-                raise RuntimeError(f"Chunk {idx} returned {actual_f} frames, expected at least {c_frames}")
+            if actual_f < extract_f:
+                raise RuntimeError(f"Chunk {idx} returned {actual_f} frames, expected at least {extract_f}")
 
-            if actual_f > c_frames:
+            if actual_f > extract_f:
                 trimmed_chunk = work_dir / f"t_{c_tag}.mp4"
-                subprocess.run([
+                trim_cmd = [
                     "ffmpeg", "-y", "-v", "error", "-i", str(dst_chunk),
-                    "-frames:v", str(c_frames), "-c:v", "libx264", "-crf", "14",
-                    "-pix_fmt", "yuv420p",
+                    "-frames:v", str(extract_f),
+                    "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                     "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-                    "-c:a", "copy", str(trimmed_chunk)
-                ], check=True)
+                ]
+                trim_cmd += ["-c:a", "copy"] if keep_gen_audio else ["-an"]
+                trim_cmd += [str(trimmed_chunk)]
+                subprocess.run(trim_cmd, check=True)
                 os.replace(trimmed_chunk, dst_chunk)
 
-            rendered_parts.append(str(dst_chunk))
+            rendered_specs.append({
+                "path": str(dst_chunk), "extract_frames": extract_f,
+                "frames": c_frames, "overlap_prev": ov_prev,
+            })
 
-        # 5. Re-time and Concat
-        job["stage"] = "Concatenating chunks and verifying frame synchronization..."
+        # 5. Assemble chunks losslessly (Cosine crossfade + overlap color anchor when chunks overlap)
+        job["stage"] = "Assembling chunks losslessly & blending seams..."
         job["progress"] = 87.0
         on_update(job)
 
-        audio_mode = settings.get("audio_mode", "original")
-        keep_gen_audio = (audio_mode == "generated")
+        joined_raw = work_dir / "joined_raw.mp4"
+        gen_audio_path = None
+        has_overlap = len(rendered_specs) > 1 and any(sp["overlap_prev"] > 0 for sp in rendered_specs[1:])
 
-        retimed_parts = []
-        for p in rendered_parts:
-            rt = work_dir / f"rt_{os.path.basename(p)}"
+        if len(rendered_specs) == 1:
             rt_cmd = [
-                "ffmpeg", "-y", "-v", "error", "-i", p,
+                "ffmpeg", "-y", "-v", "error", "-i", rendered_specs[0]["path"],
                 "-vf", f"setpts=N/(({r_fps})*TB)", "-fps_mode", "passthrough",
-                "-c:v", "libx264", "-crf", "15", "-pix_fmt", "yuv420p",
+                "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
                 "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
             ]
-            if keep_gen_audio:
-                rt_cmd += ["-c:a", "aac", "-b:a", "192k"]
-            else:
-                rt_cmd += ["-an"]
-            rt_cmd += [str(rt)]
+            rt_cmd += ["-c:a", "aac", "-b:a", "192k"] if keep_gen_audio else ["-an"]
+            rt_cmd += [str(joined_raw)]
             subprocess.run(rt_cmd, check=True)
-            retimed_parts.append(str(rt))
-
-        concat_list = work_dir / "concat.txt"
-        concat_list.write_text("".join("file '%s'\n" % os.path.abspath(p).replace("'", "'\\''") for p in retimed_parts))
-        joined_raw = work_dir / "joined_raw.mp4"
-        concat_cmd = [
-            "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
-            "-i", str(concat_list), "-c:v", "libx264", "-crf", "15",
-            "-fps_mode", "passthrough", "-pix_fmt", "yuv420p",
-            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
-        ]
-        if keep_gen_audio:
-            concat_cmd += ["-c:a", "aac", "-b:a", "192k"]
+        elif has_overlap:
+            enc_stitch = [
+                "ffmpeg", "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "rgb24",
+                "-s", f"{tw}x{th}", "-r", str(r_fps), "-i", "-",
+                "-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709:in_range=full:out_range=tv",
+                "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                str(joined_raw)
+            ]
+            stitch_res = colorfix.stitch_chunks_overlap(rendered_specs, enc_stitch, tw, th, align_color=True)
+            job["stitch_info"] = stitch_res
+            if keep_gen_audio:
+                aud_parts = []
+                for idx, sp in enumerate(rendered_specs):
+                    ap = work_dir / f"ga_{idx:03d}.m4a"
+                    a_cmd = ["ffmpeg", "-y", "-v", "error", "-i", sp["path"]]
+                    if sp["overlap_prev"] > 0:
+                        a_cmd += ["-ss", f"{sp['overlap_prev'] / fps:.6f}"]
+                    a_cmd += ["-t", f"{sp['frames'] / fps:.6f}", "-vn", "-c:a", "aac", "-b:a", "192k", str(ap)]
+                    r_aud = subprocess.run(a_cmd, check=False)
+                    if r_aud.returncode == 0 and ap.exists() and ap.stat().st_size > 200:
+                        aud_parts.append(str(ap))
+                if len(aud_parts) == len(rendered_specs):
+                    alist = work_dir / "audio_concat.txt"
+                    alist.write_text("".join("file '%s'\n" % os.path.abspath(p).replace("'", "'\\''") for p in aud_parts))
+                    gen_audio_path = work_dir / "gen_audio.m4a"
+                    subprocess.run([
+                        "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                        "-i", str(alist), "-c:a", "copy", str(gen_audio_path)
+                    ], check=True)
         else:
-            concat_cmd += ["-an"]
-        concat_cmd += [str(joined_raw)]
-        subprocess.run(concat_cmd, check=True)
+            retimed_parts = []
+            for sp in rendered_specs:
+                p = sp["path"]
+                rt = work_dir / f"rt_{os.path.basename(p)}"
+                rt_cmd = [
+                    "ffmpeg", "-y", "-v", "error", "-i", p,
+                    "-vf", f"setpts=N/(({r_fps})*TB)", "-fps_mode", "passthrough",
+                    "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+                    "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
+                ]
+                rt_cmd += ["-c:a", "aac", "-b:a", "192k"] if keep_gen_audio else ["-an"]
+                rt_cmd += [str(rt)]
+                subprocess.run(rt_cmd, check=True)
+                retimed_parts.append(str(rt))
 
-        # 6. Color Consistency pass if enabled
+            concat_list = work_dir / "concat.txt"
+            concat_list.write_text("".join("file '%s'\n" % os.path.abspath(p).replace("'", "'\\''") for p in retimed_parts))
+            concat_cmd = [
+                "ffmpeg", "-y", "-v", "error", "-f", "concat", "-safe", "0",
+                "-i", str(concat_list), "-c:v", "copy",
+            ]
+            concat_cmd += ["-c:a", "copy"] if keep_gen_audio else ["-an"]
+            concat_cmd += [str(joined_raw)]
+            subprocess.run(concat_cmd, check=True)
+
+        # 6. Color Consistency pass (Wavelet Color Fix / Global Lab / Temporal / Seams)
         assembled_video = joined_raw
+        assembled_is_final_encoded = False
         color_report = None
         if settings.get("color_enabled", False):
             job["stage"] = "Analyzing color consistency & temporal flicker..."
             job["progress"] = 90.0
             on_update(job)
 
-            # Sample low-res stats for both source (matching exact time window & frame count) and assembled output
-            w_stat, h_stat = 320, int(round(320 * (th / tw)))
-            src_in_args = []
-            if r_s > 0.001:
-                src_in_args += ["-ss", f"{r_s:.6f}"]
-            src_in_args += ["-i", src, "-frames:v", str(total_frames)]
-            src_cmd = colorfix.lowres_cmd(src_in_args, f"scale={tw}:{th}:flags=lanczos", w_stat, h_stat)
+            # Sample low-res stats with frame-accurate seek AND identical source crop/resize geometry
+            w_stat = 320
+            h_stat = max(2, int(round(320 * (th / tw))) // 2 * 2)
+            pre_s, post_s = _src_seek_input_args(src, r_s, fps)
+            src_in_args = [*pre_s, "-i", src, *post_s, "-frames:v", str(total_frames)]
+            src_cmd = colorfix.lowres_cmd(src_in_args, vf_geom, w_stat, h_stat)
             out_cmd = colorfix.lowres_cmd(["-i", str(joined_raw)], "", w_stat, h_stat)
 
             bounds_frames = [c["start_frame"] for c in chunks[1:]]
@@ -644,22 +721,30 @@ class Engine:
             src_stats = colorfix.collect_stats(src_cmd, w_stat, h_stat)
             out_stats = colorfix.collect_stats(out_cmd, w_stat, h_stat)
 
-            color_report = colorfix.analyze(src_stats, out_stats, fps, cuts_frames, bounds_frames)
+            before_report = colorfix.analyze(src_stats, out_stats, fps, cuts_frames, bounds_frames)
+            color_report = before_report
             job["color_analysis"] = color_report
 
             should_apply = True
-            if settings.get("color_auto", False) and color_report["verdict"] == "ok":
+            if settings.get("color_auto", False) and before_report["verdict"] == "ok":
                 should_apply = False
 
             if should_apply:
-                job["stage"] = "Applying color matching & flicker correction (face protected)..."
+                c_mode = settings.get("color_mode", "wavelet")
+                c_str = float(settings.get("color_strength", 0.85))
+                c_max = float(settings.get("color_max_shift", 12.0))
+                prot_faces = bool(settings.get("protect_faces", False))
+                prot_skin = float(settings.get("protect_skin", 0.0))
+
+                mode_label = "Wavelet Color Fix" if c_mode == "wavelet" else f"Color Match ({c_mode})"
+                job["stage"] = f"Applying {mode_label} & encoding final video stream..."
                 on_update(job)
+
                 plan_ = colorfix.plan(
                     src_stats, out_stats, cuts_frames, bounds_frames,
-                    mode=settings.get("color_mode", "source"),
-                    strength=float(settings.get("color_strength", 0.85)),
+                    mode=c_mode, strength=c_str,
                     window=int(settings.get("color_window", 9)),
-                    max_shift=float(settings.get("color_max_shift", 6.0)),
+                    max_shift=c_max,
                     match_std=bool(settings.get("color_match_std", True))
                 )
                 corrected_video = work_dir / "color_corrected.mp4"
@@ -673,18 +758,45 @@ class Engine:
                     "-s", f"{tw}x{th}", "-r", str(r_fps), "-i", "-",
                     "-vf", "scale=in_color_matrix=bt709:out_color_matrix=bt709:in_range=full:out_range=tv",
                     "-c:v", settings.get("vcodec", "libx264"), "-crf", str(settings.get("crf", 14)),
-                    "-preset", settings.get("x_preset", "medium"), "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
+                    "-preset", settings.get("x_preset", "slow"), "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
                     "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709",
                     str(corrected_video)
                 ]
-                colorfix.apply(
-                    dec_c, enc_c, tw, th, plan_,
-                    protect_faces=bool(settings.get("protect_faces", True)),
-                    protect_skin=float(settings.get("protect_skin", 0.6))
-                )
+                if c_mode == "wavelet":
+                    sw_w = min(tw, 480)
+                    sh_w = max(2, int(round(th * sw_w / tw)) // 2 * 2)
+                    src_wave_cmd = colorfix.lowres_cmd(src_in_args, vf_geom, sw_w, sh_w)
+                    colorfix.apply_wavelet(
+                        dec_c, src_wave_cmd, enc_c, tw, th, sw_w, sh_w,
+                        strength=c_str, max_shift=c_max,
+                        seam_offsets=plan_["seam_offset"],
+                        protect_faces=prot_faces, protect_skin=prot_skin,
+                    )
+                else:
+                    colorfix.apply(
+                        dec_c, enc_c, tw, th, plan_,
+                        protect_faces=prot_faces, protect_skin=prot_skin,
+                    )
                 assembled_video = corrected_video
+                assembled_is_final_encoded = True
 
-        # 7. Audio Mux & Final Export
+                # Fast low-res post-fix verification so the UI reports true final quality + before/after delta
+                try:
+                    after_cmd = colorfix.lowres_cmd(["-i", str(corrected_video)], "", w_stat, h_stat)
+                    after_stats = colorfix.collect_stats(after_cmd, w_stat, h_stat)
+                    after_report = colorfix.analyze(src_stats, after_stats, fps, cuts_frames, bounds_frames)
+                    after_report["applied_mode"] = c_mode
+                    after_report["before"] = {
+                        "verdict": before_report["verdict"],
+                        "drift": before_report["drift"],
+                        "flicker": before_report["flicker"],
+                        "seams": before_report["seams"],
+                    }
+                    job["color_analysis"] = after_report
+                except Exception:
+                    pass
+
+        # 7. Audio Mux & Final Export (single final video encode; stream-copy when already encoded in Step 6)
         job["stage"] = "Muxing audio losslessly and finalizing container..."
         job["progress"] = 95.0
         on_update(job)
@@ -701,35 +813,41 @@ class Engine:
                 export_cmd += ["-ss", f"{r_s:.6f}", "-t", f"{dur:.6f}"]
             export_cmd += ["-i", src, "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k", "-af", "apad", "-shortest"]
         elif keep_gen_audio:
-            if assembled_video != joined_raw:
+            if gen_audio_path and gen_audio_path.exists():
+                export_cmd += ["-i", str(gen_audio_path), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k", "-shortest"]
+            elif assembled_video != joined_raw:
                 export_cmd += ["-i", str(joined_raw), "-map", "0:v:0", "-map", "1:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k", "-shortest"]
             else:
                 export_cmd += ["-map", "0:v:0", "-map", "0:a:0?", "-c:a", "aac", "-b:a", f"{settings.get('audio_bitrate_k', 256)}k"]
         else:
             export_cmd += ["-map", "0:v:0", "-an"]
 
-        export_cmd += [
-            "-c:v", settings.get("vcodec", "libx264"),
-            "-crf", str(settings.get("crf", 14)),
-            "-preset", settings.get("x_preset", "slow"),
-            "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
-            "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
-        ]
-        if settings.get("faststart", True):
+        if assembled_is_final_encoded:
+            export_cmd += ["-c:v", "copy"]
+        else:
+            export_cmd += [
+                "-c:v", settings.get("vcodec", "libx264"),
+                "-crf", str(settings.get("crf", 14)),
+                "-preset", settings.get("x_preset", "slow"),
+                "-pix_fmt", settings.get("pix_fmt", "yuv420p"),
+                "-color_range", "tv", "-colorspace", "bt709", "-color_primaries", "bt709", "-color_trc", "bt709"
+            ]
+        if settings.get("faststart", True) and ext in ("mp4", "mov"):
             export_cmd += ["-movflags", "+faststart"]
         export_cmd += [str(final_path)]
 
         subprocess.run(export_cmd, check=True)
 
-        # 8. Generate Before/After Comparison Preview
+        # 8. Generate Before/After Comparison Preview (matching exact crop/resize geometry)
         job["stage"] = "Generating before/after comparisons..."
         preview_img = work_dir / "preview_split.jpg"
         prev_off = min(0.5, max(0.0, dur * 0.2))
+        prev_src_vf = f"{vf_geom + ',' if vf_geom else ''}scale={tw}:{th}:flags=lanczos:in_color_matrix=bt709:out_color_matrix=bt709"
         subprocess.run([
             "ffmpeg", "-y", "-v", "error",
             "-ss", f"{r_s + prev_off:.3f}", "-i", src,
             "-ss", f"{prev_off:.3f}", "-i", str(final_path),
-            "-filter_complex", f"[0:v]scale={tw}:{th}:flags=lanczos:in_color_matrix=bt709:out_color_matrix=bt709[v0];[v0][1:v]hstack[v]",
+            "-filter_complex", f"[0:v]{prev_src_vf}[v0];[v0][1:v]hstack[v]",
             "-map", "[v]", "-frames:v", "1", "-q:v", "3", str(preview_img)
         ], check=False)
 
@@ -739,9 +857,17 @@ class Engine:
             shutil.copy2(preview_img, pub_preview)
             preview_url = f"/outputs/{pub_preview.name}"
 
-        # 9. Clean up scratch if not requested to keep
+        # 9. Clean up scratch & this job's temporary ComfyUI I/O files if not keeping chunks
         if not settings.get("keep_chunks", False):
             shutil.rmtree(work_dir, ignore_errors=True)
+            for sub in ("input", "output"):
+                io_dir = DIRS["comfy_io"] / sub
+                if io_dir.exists():
+                    for tmp_f in io_dir.glob(f"*ltx_{job_id}_*"):
+                        try:
+                            tmp_f.unlink()
+                        except Exception:
+                            pass
 
         # Finish
         t_total = time.time() - t_start

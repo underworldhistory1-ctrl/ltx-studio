@@ -102,10 +102,12 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
 
             ov = float(settings.get("overlap_frac", 0.0))
             if ov > 0:
-                pr[N_SAMPLER]["inputs"]["overlap_frac"] = ov
+                pr[N_SAMPLER]["inputs"]["overlap_frac"] = max(0.25, min(0.75, ov))
             tf = int(settings.get("tile_frames", 0))
             if tf > 0:
                 pr[N_SAMPLER]["inputs"]["tile_frames"] = tf
+                if N_GUIDE in pr and "inputs" in pr[N_GUIDE]:
+                    pr[N_GUIDE]["inputs"]["tile_frames"] = tf
             cd = settings.get("canvas_device", "auto")
             if cd in ("auto", "cpu", "gpu"):
                 pr[N_SAMPLER]["inputs"]["canvas_device"] = cd
@@ -190,11 +192,15 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
             if neg_p and "5509" in pr:
                 pr["5509"]["inputs"]["value"] = neg_p
 
-    # 7. Ensure CreateVideo explicitly sets sRGB (BT.709 matrix) across all modes
+    # 7. Ensure CreateVideo explicitly sets sRGB (BT.709 matrix) across all modes,
+    #    and detach unused audio branch when original/muted audio is selected.
+    audio_mode = settings.get("audio_mode", "original")
     cv_node = pr.get("5518:4849")
     if cv_node and "inputs" in cv_node:
         cv_node["inputs"].setdefault("color_space", "sRGB")
         cv_node["inputs"].setdefault("codec", "none")
+        if audio_mode != "generated":
+            cv_node["inputs"].pop("audio", None)
 
     # 8. VAE Decode Tiled settings
     # Note: Diffusion sampling already uses 1024x576 tiles (LTXVTiledFusionSampler).
@@ -212,7 +218,12 @@ def build_workflow(settings: dict, input_video_name: str, output_prefix: str, tw
         vaedec_node["inputs"]["tile_size"] = eff_tile
         vaedec_node["inputs"]["overlap"] = 128 if eff_tile >= 512 else max(32, (eff_tile // 4) // 32 * 32)
         eff_temp = dec_temp if dec_temp > 0 else (64 if total_ram_gb < 64 else 128)
+        eff_temp = max(8, (eff_temp // 4) * 4)
+        t_ov = min(32, max(16, (eff_temp // 4) // 8 * 8))
+        if t_ov >= eff_temp:
+            t_ov = max(4, ((eff_temp // 2) // 4) * 4)
         vaedec_node["inputs"]["temporal_size"] = eff_temp
-        vaedec_node["inputs"]["temporal_overlap"] = min(32, max(16, (eff_temp // 4) // 8 * 8))
+        vaedec_node["inputs"]["temporal_overlap"] = t_ov
 
-    return pr
+    # 9. Always prune dead branches (unused Audio VAE, PreviewAny, duplicate CLIP loader)
+    return prune_unreachable(pr, N_SAVE)

@@ -27,12 +27,12 @@ DEFAULTS = {
     "grid_cycle": 1, "tile_frames": 0, "canvas_device": "auto",
     "video_vae": "ltx-2.5-video-vae-bf16.safetensors", "audio_vae": "ltx-2.5-audio-vae-bf16.safetensors",
     "decode_tile": 1024, "decode_temporal": 0,
-    "budget_fmp": 0, "max_chunk_s": 0, "snap_to_cuts": True,
+    "budget_fmp": 0, "max_chunk_s": 0, "snap_to_cuts": True, "chunk_overlap": 8,
     "audio_mode": "original", "audio_bitrate_k": 256,
     "container": "mp4", "vcodec": "libx264", "crf": 14, "x_preset": "slow", "pix_fmt": "yuv420p", "faststart": True,
     "keep_chunks": False,
-    "color_enabled": True, "color_mode": "source", "color_strength": 0.85, "color_window": 9,
-    "color_max_shift": 6.0, "color_match_std": True, "protect_faces": True, "protect_skin": 0.6,
+    "color_enabled": True, "color_mode": "wavelet", "color_strength": 0.85, "color_window": 9,
+    "color_max_shift": 12.0, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0,
     "color_auto": False,
     "range_start_s": None, "range_end_s": None,
     "test_enabled": False, "test_start_s": 0.0, "test_frames": 17,
@@ -52,7 +52,7 @@ OPTIONS = {
     "vcodec": ["libx264", "libx265"],
     "x_preset": ["veryfast", "fast", "medium", "slow", "slower"],
     "pix_fmt": ["yuv420p", "yuv420p10le"],
-    "color_mode": ["source", "temporal", "seams"],
+    "color_mode": ["wavelet", "source", "temporal", "seams"],
     "sampler_name": ["euler", "euler_ancestral", "heun", "dpm_2", "lms", "ddim", "uni_pc"],
     "test_frames": [9, 17, 25, 33, 49, 65],
 }
@@ -120,6 +120,8 @@ SCHEMA = [
          "help": "Refine: the system-RAM dial (~33 MB per frame-MP on top of the staged models). Pixel: the VRAM dial."},
         {"key": "max_chunk_s", "label": "Max chunk length, seconds (0 = auto)", "type": "number", "min": 0, "max": 60, "step": 0.5},
         {"key": "snap_to_cuts", "label": "Snap chunk boundaries to scene cuts", "type": "bool"},
+        {"key": "chunk_overlap", "label": "Chunk overlap frames (0 = hard cut, 8 = smooth cosine crossfade)", "type": "number", "min": 0, "max": 16, "step": 2,
+         "help": "Overlaps consecutive non-cut chunks and blends them with a cosine crossfade + overlap color anchor so chunk transitions disappear. Automatically 0 at detected scene cuts."},
     ]},
     {"group": "audio", "title": "Audio", "fields": [
         {"key": "audio_mode", "label": "Audio", "type": "select", "options": OPTIONS["audio_mode"],
@@ -140,23 +142,28 @@ SCHEMA = [
          "help": "Runs after rendering: reduces colour/brightness flicker and chunk-to-chunk colour jumps."},
         {"key": "color_auto", "label": "Only apply when flicker is detected", "type": "bool", "show_if": {"color_enabled": True}},
         {"key": "color_mode", "label": "Match mode", "type": "select", "options": OPTIONS["color_mode"], "show_if": {"color_enabled": True},
-         "labels": {"source": "Match the source clip (colour matching)", "temporal": "Only remove temporal flicker", "seams": "Only smooth chunk seams"}},
+         "labels": {
+             "wavelet": "Wavelet Color Fix (local source color + 100% micro-detail, recommended)",
+             "source": "Global Lab Match (source mean/contrast + seam blend)",
+             "temporal": "Only remove temporal flicker (best for Restore)",
+             "seams": "Only smooth chunk seams",
+         }},
         {"key": "color_strength", "label": "Strength", "type": "range", "min": 0.0, "max": 1.0, "step": 0.05, "show_if": {"color_enabled": True}},
         {"key": "color_window", "label": "Temporal smoothing window (frames)", "type": "number", "min": 1, "max": 61, "step": 2, "show_if": {"color_enabled": True}},
-        {"key": "color_max_shift", "label": "Max colour shift (Lab units)", "type": "range", "min": 1.0, "max": 20.0, "step": 0.5, "show_if": {"color_enabled": True}},
+        {"key": "color_max_shift", "label": "Max colour shift (Lab units)", "type": "range", "min": 1.0, "max": 25.0, "step": 0.5, "show_if": {"color_enabled": True}},
         {"key": "color_match_std", "label": "Also match contrast (std-dev)", "type": "bool", "show_if": {"color_enabled": True}},
-        {"key": "protect_faces", "label": "Protect faces (OpenCV frontal-face detector)", "type": "bool", "show_if": {"color_enabled": True}},
-        {"key": "protect_skin", "label": "Protect skin tones", "type": "range", "min": 0.0, "max": 1.0, "step": 0.05, "show_if": {"color_enabled": True}},
+        {"key": "protect_faces", "label": "Protect faces (global modes only; Wavelet preserves faces locally)", "type": "bool", "show_if": {"color_enabled": True}},
+        {"key": "protect_skin", "label": "Protect skin tones (global modes only)", "type": "range", "min": 0.0, "max": 1.0, "step": 0.05, "show_if": {"color_enabled": True}},
     ]},
 ]
 
 BUILTIN_PRESETS = {
-    "identity_safe": {"label": "Faces & identity safe (recommended)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "protect_faces": True, "decode_tile": 1024}},
-    "detail_4k": {"label": "4K detail, single pass", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 3840, "guide_strength": 1.0, "cached_cond": True, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
-    "max_texture": {"label": "Max texture (Pixel, fast)", "settings": {"mode": "pixel", "restore_first": False, "resolution_mode": "scale", "scale": 2.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
-    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "temporal", "color_strength": 0.85, "decode_tile": 1024}},
-    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "restore_first": False, "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85}},
-    "in_place": {"label": "Re-detail in place (1.0x)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.0, "guide_strength": 1.0, "color_enabled": True, "color_auto": False, "color_mode": "source", "color_strength": 0.85, "color_match_std": True, "decode_tile": 1024}},
+    "identity_safe": {"label": "Faces & identity safe (recommended)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "detail_4k": {"label": "4K detail, single pass", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "preset", "preset_long_edge": 3840, "guide_strength": 1.0, "cached_cond": True, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "max_texture": {"label": "Max texture (Pixel, fast)", "settings": {"mode": "pixel", "restore_first": False, "resolution_mode": "scale", "scale": 2.0, "chunk_overlap": 4, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "old_footage": {"label": "Old footage: Restore then Refine", "settings": {"mode": "refine", "restore_first": True, "resolution_mode": "scale", "scale": 1.5, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "temporal", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
+    "low_vram": {"label": "Low VRAM (GGUF)", "settings": {"mode": "refine", "restore_first": False, "precision": "gguf", "cached_cond": True, "decode_tile": 256, "decode_temporal": 32, "budget_fmp": 250, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "protect_faces": False, "protect_skin": 0.0}},
+    "in_place": {"label": "Re-detail in place (1.0x)", "settings": {"mode": "refine", "restore_first": False, "resolution_mode": "scale", "scale": 1.0, "guide_strength": 1.0, "chunk_overlap": 8, "color_enabled": True, "color_auto": False, "color_mode": "wavelet", "color_strength": 0.85, "color_match_std": True, "protect_faces": False, "protect_skin": 0.0, "decode_tile": 1024}},
 }
 
 
@@ -202,8 +209,8 @@ def normalize(raw: dict):
     s["color_strength"] = _clamp(s["color_strength"], 0.0, 1.0)
     s["protect_skin"] = _clamp(s["protect_skin"], 0.0, 1.0)
     s["color_window"] = int(_clamp(s["color_window"], 1, 61)) | 1
-    s["color_max_shift"] = _clamp(s["color_max_shift"], 1.0, 20.0)
-    s["overlap_frac"] = _clamp(s["overlap_frac"], 0.0, 0.5)
+    s["color_max_shift"] = _clamp(s["color_max_shift"], 1.0, 25.0)
+    s["overlap_frac"] = _clamp(s["overlap_frac"], 0.0, 0.75)
     s["blend_var"] = _clamp(s["blend_var"], 0.0, 0.5)
     s["grid_cycle"] = int(_clamp(s["grid_cycle"], 1, 8))
     s["tile_frames"] = int(_clamp(s["tile_frames"], 0, 241))
@@ -213,6 +220,7 @@ def normalize(raw: dict):
     s["decode_temporal"] = int(_clamp(s["decode_temporal"], 0, 256))
     s["budget_fmp"] = float(_clamp(s["budget_fmp"], 0, 2000))
     s["max_chunk_s"] = float(_clamp(s["max_chunk_s"], 0, 60))
+    s["chunk_overlap"] = int(_clamp(s["chunk_overlap"], 0, 16))
     s["seed"] = int(_clamp(s["seed"], 0, 2**31 - 1))
     if s["mode"] == "pixel":
         if s["restore_first"]:

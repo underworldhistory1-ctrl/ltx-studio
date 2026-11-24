@@ -420,6 +420,14 @@ function applyPreset(presetKey) {
     document.getElementById('color-str-val').innerText = s.color_strength.toFixed(2);
   }
   if (s.protect_faces !== undefined) document.getElementById('protect-faces-chk').checked = s.protect_faces;
+  if (s.protect_skin !== undefined) {
+    const skinChk = document.getElementById('protect-skin-chk');
+    if (skinChk) skinChk.checked = Number(s.protect_skin) > 0;
+  }
+  if (s.chunk_overlap !== undefined) {
+    const ovIn = document.getElementById('chunk-overlap-input');
+    if (ovIn) ovIn.value = s.chunk_overlap;
+  }
 
   const prec = s.precision || 'int8';
   document.getElementById('precision-select').value = prec;
@@ -482,10 +490,10 @@ function collectSettings(isTest = false) {
     // Color consistency
     color_enabled: getChecked('color-enable-chk', true),
     color_auto: getChecked('color-auto-chk', false),
-    color_mode: getVal('color-mode-select', 'source') || 'source',
+    color_mode: getVal('color-mode-select', 'wavelet') || 'wavelet',
     color_strength: getFloat('color-str-slider', 0.85),
     color_match_std: true,
-    protect_faces: getChecked('protect-faces-chk', true),
+    protect_faces: getChecked('protect-faces-chk', false),
     protect_skin: getChecked('protect-skin-chk', false) ? 0.6 : 0.0,
 
     // Precision & Encoder
@@ -514,6 +522,7 @@ function collectSettings(isTest = false) {
     // Memory
     budget_fmp: getFloat('budget-input', 0.0),
     snap_to_cuts: getChecked('snap-cuts-chk', true),
+    chunk_overlap: getInt('chunk-overlap-input', 8),
 
     // Audio & Export
     audio_mode: getVal('audio-mode-select', 'original') || 'original',
@@ -935,16 +944,24 @@ function showComparisonResult(job) {
     const qa = job.color_analysis;
     qaCard.style.display = 'block';
     const vBadge = document.getElementById('qa-verdict-badge');
-    vBadge.innerText = qa.verdict.toUpperCase();
+    const modeTag = qa.applied_mode ? ` · ${qa.applied_mode.toUpperCase()}` : '';
+    vBadge.innerText = `${qa.verdict.toUpperCase()}${modeTag}`;
     vBadge.className = `badge ${qa.verdict === 'ok' ? 'highlight-badge' : ''}`;
     document.getElementById('qa-advice-text').innerText = qa.advice || '';
 
     const fl = qa.flicker || {};
     document.getElementById('q-flicker-l').innerText = `${fl.ratio_L ? fl.ratio_L.toFixed(2) : '1.00'}x`;
     const dr = qa.drift || {};
-    document.getElementById('q-chroma-shift').innerText = `${dr.mean_chroma ? dr.mean_chroma.toFixed(2) : '0.00'}`;
+    const bDr = qa.before && qa.before.drift;
+    const chNow = dr.mean_chroma ? dr.mean_chroma.toFixed(2) : '0.00';
+    document.getElementById('q-chroma-shift').innerText = bDr && bDr.mean_chroma !== undefined
+      ? `${chNow} (was ${bDr.mean_chroma.toFixed(2)})`
+      : chNow;
     const seams = (qa.seams || []).filter(s => s.flag).length;
-    document.getElementById('q-seams').innerText = `${seams} steps detected`;
+    const bSeams = qa.before && qa.before.seams ? qa.before.seams.filter(s => s.flag).length : null;
+    document.getElementById('q-seams').innerText = (bSeams !== null && bSeams !== seams)
+      ? `${seams} steps (was ${bSeams})`
+      : `${seams} steps detected`;
   }
 }
 

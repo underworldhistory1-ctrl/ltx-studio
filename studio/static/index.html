@@ -264,7 +264,7 @@
                     <input type="checkbox" id="color-enable-chk" checked>
                     <strong>Enable Color Consistency Pass</strong>
                   </label>
-                  <p class="field-hint">Eliminates temporal color flicker and chunk-to-chunk exposure jumps using Lab matching.</p>
+                  <p class="field-hint">Wavelet Color Fix locks local source colour & lighting while keeping 100% of LTX-2.5 micro-detail, grain and skin tones.</p>
 
                   <div id="color-sub-options">
                     <label class="checkbox-label" style="margin-top: 8px;">
@@ -275,8 +275,9 @@
                     <div class="option-field" style="margin-top: 8px;">
                       <label for="color-mode-select">Matching Mode</label>
                       <select id="color-mode-select" class="select-field">
-                        <option value="source" selected>Match Original Source (Full color match)</option>
-                        <option value="temporal">Temporal Smoothing Only (Remove flicker)</option>
+                        <option value="wavelet" selected>Wavelet Color Fix (Local Color + Full Detail, Recommended)</option>
+                        <option value="source">Global Lab Match (Frame-wide Mean/Contrast)</option>
+                        <option value="temporal">Temporal Smoothing Only (Best for Restore)</option>
                         <option value="seams">Seam Smoothing Only (Smooth chunk cuts)</option>
                       </select>
                     </div>
@@ -288,12 +289,12 @@
 
                     <div class="sub-toggles" style="margin-top: 10px;">
                       <label class="checkbox-label">
-                        <input type="checkbox" id="protect-faces-chk" checked>
-                        <span>Protect Faces (OpenCV Face Detection mask)</span>
+                        <input type="checkbox" id="protect-faces-chk">
+                        <span>Protect Faces mask (Global modes only; Wavelet preserves faces locally)</span>
                       </label>
                       <label class="checkbox-label">
-                        <input type="checkbox" id="protect-skin-chk" checked>
-                        <span>Protect Skin Tones</span>
+                        <input type="checkbox" id="protect-skin-chk">
+                        <span>Protect Skin Tones mask (Global modes only)</span>
                       </label>
                     </div>
                   </div>
@@ -445,6 +446,11 @@
                     <input type="checkbox" id="snap-cuts-chk" checked>
                     <span>Snap chunk splits onto detected scene transitions</span>
                   </label>
+                  <div class="option-field" style="margin-top: 8px;">
+                    <label for="chunk-overlap-input">Chunk Overlap Crossfade (frames, 0 = hard cut)</label>
+                    <input type="number" id="chunk-overlap-input" value="8" min="0" max="16" step="2" class="mini-input">
+                    <p class="field-hint">Blends non-cut chunk boundaries with cosine crossfade + overlap color anchor (auto 0 at scene cuts).</p>
+                  </div>
                 </div>
               </div>
 
@@ -717,6 +723,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=queue-terminal-v3"></script>
+  <script src="/static/app.js?v=wavelet-overlap-v4"></script>
 </body>
 </html>
