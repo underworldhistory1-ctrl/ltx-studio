@@ -184,7 +184,11 @@ def install_from_environment(queue):
         last_dynamic = dynamic
         return (free + reserved + dynamic) / 1024 ** 2
 
-    gate = SharedGpuQueue(queue, FileLease(path), PeerReadiness(peer, available_mb))
+    _, _total_bytes = torch.cuda.mem_get_info()
+    default_min = min(27000, int((_total_bytes / 1024 ** 2) * 0.82))
+    env_min = int(os.environ.get('STUDIO_SHARED_GPU_MIN_MB', '0') or 0)
+    min_mb = env_min if env_min > 0 else default_min
+    gate = SharedGpuQueue(queue, FileLease(path), PeerReadiness(peer, available_mb, minimum_mb=min_mb))
     gate.install()
-    logger.info('Shared GPU admission enabled with peer %s', peer)
+    logger.info('Shared GPU admission enabled with peer %s (min_mb=%d)', peer, min_mb)
     return gate

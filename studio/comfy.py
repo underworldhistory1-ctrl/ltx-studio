@@ -128,6 +128,10 @@ class ComfyProcess:
             env["PYTORCH_CUDA_ALLOC_CONF"] = cfg.get("alloc_conf", "expandable_segments:True")
             env["PYTHONUNBUFFERED"] = "1"
             env.pop("PYTHONHOME", None)
+            if os.name == "posix" and cfg.get("coordinate_h3", True):
+                h3_url = (cfg.get("h3_url") or "http://127.0.0.1:8188").rstrip("/")
+                env.setdefault("STUDIO_SHARED_GPU_PEER", h3_url)
+                env.setdefault("STUDIO_SHARED_GPU_LOCK", "/tmp/studio_shared_gpu.lock")
             log = open(DIRS["logs"] / "comfy.log", "ab")
             cmd = self.build_cmd()
             log.write(f"\n=== {time.ctime()} start: {' '.join(cmd)}\n".encode())
